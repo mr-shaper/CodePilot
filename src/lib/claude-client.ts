@@ -23,7 +23,7 @@ import { spawn } from 'child_process';
 import { getSetting, getActiveProvider } from './db';
 import { findClaudeBinary, findGitBash, getExpandedPath, normalizeStdioCommand } from './platform';
 import { refreshAccessToken, writeProxyAccounts } from './antigravity';
-import { startAntigravityProxy, fetchAntigravityProjectId } from './antigravity-proxy';
+import { startAntigravityProxy, fetchAntigravityProjectId, getProxyBaseUrl } from './antigravity-proxy';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
@@ -261,26 +261,32 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
           // Antigravity provider: start local proxy that translates Anthropic ↔ Gemini format
           if (activeProvider.provider_type === 'antigravity' && activeProvider.api_key) {
             try {
-              // Refresh the access token first
-              const tokenResult = await refreshAccessToken(activeProvider.api_key);
-              if (!tokenResult) {
-                throw new Error('Failed to refresh Antigravity access token. Please re-authenticate in Settings > API Providers.');
+              // Check if the proxy is already running (reuse instead of restart)
+              let proxyBaseUrl = getProxyBaseUrl();
+              if (!proxyBaseUrl) {
+                // Proxy not running — refresh token and start a new one
+                const tokenResult = await refreshAccessToken(activeProvider.api_key);
+                if (!tokenResult) {
+                  throw new Error('Failed to refresh Antigravity access token. Please re-authenticate in Settings > API Providers.');
+                }
+
+                // Fetch the GCP project ID from Antigravity backend
+                const projectId = await fetchAntigravityProjectId(tokenResult.accessToken);
+                console.log(`[claude-client] Antigravity project ID: ${projectId}`);
+
+                // Write proxy accounts.json for cross-compatibility with standalone antigravity-claude-proxy
+                writeProxyAccounts(activeProvider.api_key, projectId);
+
+                // Start the local proxy server
+                proxyBaseUrl = await startAntigravityProxy(
+                  activeProvider.api_key,
+                  tokenResult.accessToken,
+                  projectId,
+                  tokenResult.expiresIn,
+                );
+              } else {
+                console.log(`[claude-client] Reusing existing Antigravity proxy at ${proxyBaseUrl}`);
               }
-
-              // Fetch the GCP project ID from Antigravity backend
-              const projectId = await fetchAntigravityProjectId(tokenResult.accessToken);
-              console.log(`[claude-client] Antigravity project ID: ${projectId}`);
-
-              // Write proxy accounts.json for cross-compatibility with standalone antigravity-claude-proxy
-              writeProxyAccounts(activeProvider.api_key, projectId);
-
-              // Start the local proxy server
-              const proxyBaseUrl = await startAntigravityProxy(
-                activeProvider.api_key,
-                tokenResult.accessToken,
-                projectId,
-                tokenResult.expiresIn,
-              );
 
               // CRITICAL: Clear AUTH_TOKEN — it contains the Google refresh token,
               // and Claude Code will crash (exit code 1) if it tries to validate

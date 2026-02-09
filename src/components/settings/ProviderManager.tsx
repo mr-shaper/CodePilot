@@ -143,8 +143,8 @@ export function ProviderManager() {
       if (res.ok) {
         setProviders((prev) => prev.filter((p) => p.id !== deleteTarget.id));
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? `Delete failed: ${err.message}` : 'Failed to delete provider');
     } finally {
       setDeleting(false);
       setDeleteTarget(null);
@@ -166,8 +166,9 @@ export function ProviderManager() {
           }))
         );
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? `Activation failed: ${err.message}` : 'Failed to activate provider');
+      fetchProviders(); // Refresh to restore correct state
     } finally {
       setActivatingId(null);
     }
@@ -186,8 +187,9 @@ export function ProviderManager() {
           prev.map((p) => ({ ...p, is_active: 0 }))
         );
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? `Deactivation failed: ${err.message}` : 'Failed to deactivate provider');
+      fetchProviders(); // Refresh to restore correct state
     } finally {
       setActivatingId(null);
     }
@@ -220,8 +222,14 @@ export function ProviderManager() {
 
       {/* Error */}
       {error && (
-        <div className="rounded-md bg-destructive/10 p-3">
-          <p className="text-sm text-destructive">{error}</p>
+        <div className="flex items-center gap-2 rounded-md bg-red-500/10 p-3 text-sm text-red-500">
+          <p className="flex-1">{error}</p>
+          <button
+            onClick={() => fetchProviders()}
+            className="shrink-0 rounded px-2 py-1 text-xs bg-red-500/20 hover:bg-red-500/30 transition-colors"
+          >
+            Retry
+          </button>
         </div>
       )}
 

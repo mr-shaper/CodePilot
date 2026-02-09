@@ -199,20 +199,42 @@ export function ProviderForm({
 
       // Poll for completion (every 2s, up to 5 minutes)
       const maxAttempts = 150;
+      let consecutiveErrors = 0;
       for (let i = 0; i < maxAttempts; i++) {
         await new Promise((r) => setTimeout(r, 2000));
-        const pollRes = await fetch("/api/providers/antigravity-auth");
-        const pollData = await pollRes.json();
-        if (pollData.status === "complete") {
-          setApiKey(pollData.refreshToken);
-          setOauthEmail(pollData.email || null);
-          setOauthLoading(false);
-          return;
+        try {
+          const pollRes = await fetch("/api/providers/antigravity-auth");
+          if (!pollRes.ok) {
+            consecutiveErrors++;
+            if (consecutiveErrors >= 3) {
+              throw new Error(`Poll request failed with status ${pollRes.status}`);
+            }
+            continue; // Retry on transient HTTP errors
+          }
+          consecutiveErrors = 0;
+          const pollData = await pollRes.json();
+          if (pollData.status === "complete") {
+            setApiKey(pollData.refreshToken);
+            setOauthEmail(pollData.email || null);
+            setOauthLoading(false);
+            return;
+          }
+          if (pollData.status === "error") {
+            throw new Error(pollData.error || "OAuth failed");
+          }
+          // "pending" -> continue polling
+        } catch (pollErr) {
+          // Re-throw intentional errors (from status checks above)
+          if (pollErr instanceof Error && (pollErr.message.includes("OAuth failed") || pollErr.message.includes("Poll request failed"))) {
+            throw pollErr;
+          }
+          // Network errors: tolerate a few before giving up
+          consecutiveErrors++;
+          if (consecutiveErrors >= 3) {
+            throw new Error("Network error while polling for OAuth completion");
+          }
+          // Otherwise continue polling
         }
-        if (pollData.status === "error") {
-          throw new Error(pollData.error || "OAuth failed");
-        }
-        // "pending" → continue polling
       }
       throw new Error("OAuth timed out");
     } catch (err) {

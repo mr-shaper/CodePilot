@@ -81,7 +81,6 @@ const ANTIGRAVITY_HEADERS: Record<string, string> = {
 // Antigravity system instruction (from CLIProxyAPI)
 const ANTIGRAVITY_SYSTEM_INSTRUCTION = `You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**`;
 
-const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
 const MIN_SIGNATURE_LENGTH = 50;
 
 // ── Type definitions ──
@@ -169,6 +168,7 @@ function mapModelName(model: string): string {
   if (lower.includes('claude')) return 'claude-sonnet-4-5';
 
   // Unknown model — pass through and hope for the best
+  debugLog('proxy-warn', `Unknown model "${model}" — passing through unmapped`);
   return model;
 }
 
@@ -502,10 +502,23 @@ function buildAntigravityRequest(
 // Claude Code may strip thoughtSignature from tool_use blocks.
 // We cache them here so we can restore them on subsequent turns.
 
+const MAX_SIGNATURE_CACHE_SIZE = 500;
+const MAX_THINKING_SIGNATURE_CACHE_SIZE = 50;
+
 const signatureCache = new Map<string, string>();        // toolId → thoughtSignature
 const thinkingSignatureCache = new Map<string, string>(); // modelFamily → last thinking signature
 
+function evictOldestHalf(cache: Map<string, string>): void {
+  const keys = [...cache.keys()];
+  for (let i = 0; i < keys.length / 2; i++) {
+    cache.delete(keys[i]);
+  }
+}
+
 function cacheSignature(toolId: string, signature: string): void {
+  if (signatureCache.size >= MAX_SIGNATURE_CACHE_SIZE) {
+    evictOldestHalf(signatureCache);
+  }
   signatureCache.set(toolId, signature);
 }
 
@@ -514,6 +527,9 @@ function getCachedSignature(toolId: string): string | undefined {
 }
 
 function cacheThinkingSignature(signature: string, modelFamily: string): void {
+  if (thinkingSignatureCache.size >= MAX_THINKING_SIGNATURE_CACHE_SIZE) {
+    evictOldestHalf(thinkingSignatureCache);
+  }
   thinkingSignatureCache.set(modelFamily, signature);
 }
 
@@ -685,8 +701,8 @@ function processGeminiChunk(
 
   try {
     data = JSON.parse(raw);
-  } catch {
-    console.warn('[antigravity-proxy] Failed to parse SSE chunk:', raw.slice(0, 200));
+  } catch (parseErr) {
+    debugLog('proxy-error', 'Failed to parse SSE chunk:', raw.slice(0, 200), parseErr);
     return '';
   }
 
@@ -818,12 +834,25 @@ async function ensureFreshToken(): Promise<string> {
     return proxyConfig.accessToken;
   }
 
-  const result = await refreshAccessToken(proxyConfig.refreshToken);
-  if (!result) throw new Error('Failed to refresh access token');
-
-  proxyConfig.accessToken = result.accessToken;
-  proxyConfig.tokenExpiry = Date.now() + result.expiresIn * 1000;
-  return result.accessToken;
+  // Retry up to 2 times (3 attempts total)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const result = await refreshAccessToken(proxyConfig.refreshToken);
+      if (result) {
+        proxyConfig.accessToken = result.accessToken;
+        proxyConfig.tokenExpiry = Date.now() + result.expiresIn * 1000;
+        return result.accessToken;
+      }
+    } catch (err) {
+      debugLog('proxy-warn', `Token refresh attempt ${attempt + 1} threw error:`, err);
+    }
+    if (attempt < 2) {
+      debugLog('proxy-warn', `Token refresh attempt ${attempt + 1} failed, retrying in 1s...`);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  debugLog('proxy-error', 'Failed to refresh access token after 3 attempts');
+  throw new Error('Failed to refresh access token after 3 attempts');
 }
 
 /**
@@ -842,7 +871,10 @@ export async function fetchAntigravityProjectId(accessToken: string): Promise<st
         },
         body: JSON.stringify({ metadata: CLIENT_METADATA }),
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        debugLog('proxy-warn', `loadCodeAssist at ${base} returned ${res.status} ${res.statusText}`);
+        continue;
+      }
 
       const data = await res.json() as {
         cloudaicompanionProject?: string | { id?: string };
@@ -870,8 +902,8 @@ export async function fetchAntigravityProjectId(accessToken: string): Promise<st
     }
   }
 
-  debugLog('proxy-warn',` Using fallback project ID: ${DEFAULT_PROJECT_ID}`);
-  return DEFAULT_PROJECT_ID;
+  debugLog('proxy-error', 'Failed to discover Antigravity project ID from all endpoints');
+  throw new Error('Failed to discover Antigravity project ID. Please check your Google account has Cloud Code access enabled.');
 }
 
 function getDefaultTierId(allowedTiers?: Array<{ id?: string; isDefault?: boolean }>): string | undefined {
@@ -894,7 +926,10 @@ async function onboardUser(accessToken: string, tierId: string): Promise<string 
         },
         body: JSON.stringify({ tierId, metadata: CLIENT_METADATA }),
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        debugLog('proxy-warn', `onboardUser at ${base} returned ${res.status} ${res.statusText}`);
+        continue;
+      }
 
       const data = await res.json() as {
         done?: boolean;
@@ -904,7 +939,8 @@ async function onboardUser(accessToken: string, tierId: string): Promise<string 
       if (data.done && data.response?.cloudaicompanionProject?.id) {
         return data.response.cloudaicompanionProject.id;
       }
-    } catch {
+    } catch (err) {
+      debugLog('proxy-warn', `onboardUser failed at ${base}:`, err);
       continue;
     }
   }
@@ -996,7 +1032,7 @@ export async function startAntigravityProxy(
 
         if (!agResponse.ok) {
           const errText = await agResponse.text();
-          console.error(`[antigravity-proxy] Gateway error ${agResponse.status}: ${errText.slice(0, 500)}`);
+          debugLog('proxy-error', `Gateway returned ${agResponse.status} ${agResponse.statusText}. Body: ${errText.slice(0, 1000)}`);
           res.writeHead(agResponse.status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
             type: 'error',
@@ -1118,6 +1154,17 @@ export async function startAntigravityProxy(
       reject(new Error(`Proxy server failed: ${err.message}`));
     });
   });
+}
+
+/**
+ * Get the base URL of the running proxy, or null if not running.
+ * Used by claude-client to check if the proxy is already up before starting a new one.
+ */
+export function getProxyBaseUrl(): string | null {
+  if (proxyServer && proxyPort) {
+    return `http://127.0.0.1:${proxyPort}`;
+  }
+  return null;
 }
 
 export function stopAntigravityProxy(): void {

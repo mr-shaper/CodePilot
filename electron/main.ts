@@ -54,7 +54,10 @@ function checkNativeModuleABI(): void {
     console.log(`[ABI check] better_sqlite3.node ABI is compatible (${nodeFile})`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('NODE_MODULE_VERSION')) {
+    if (msg.includes('Cannot find module')) {
+      // Module file not found -- may be dev mode or incomplete install, log only
+      console.warn(`[ABI check] Module not found (may be expected in dev): ${msg}`);
+    } else if (msg.includes('NODE_MODULE_VERSION')) {
       console.error(`[ABI check] ABI mismatch detected: ${msg}`);
       dialog.showErrorBox(
         'CodePilot - Native Module ABI Mismatch',
@@ -65,8 +68,17 @@ function checkNativeModuleABI(): void {
       );
       app.quit();
     } else {
-      // Other load errors (missing dependencies, etc.) -- log but don't block
-      console.warn(`[ABI check] Could not verify better_sqlite3.node: ${msg}`);
+      // Catch all other dlopen errors: "is not a valid Win32 application",
+      // "invalid ELF header", missing DLL dependencies, etc.
+      console.error(`[ABI check] Native module load failed: ${msg}`);
+      dialog.showErrorBox(
+        'CodePilot - Native Module Load Error',
+        `The bundled better-sqlite3 native module could not be loaded.\n\n` +
+        `${msg}\n\n` +
+        `This may indicate the module was compiled for the wrong platform or architecture.\n` +
+        `Please rebuild the application or report this issue.`
+      );
+      app.quit();
     }
   }
 }

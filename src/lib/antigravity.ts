@@ -116,6 +116,7 @@ export function startAntigravityOAuth(): { authUrl: string } {
   clearPendingResult();
 
   const pkce = generatePKCE();
+  const state = base64url(crypto.randomBytes(16));
 
   const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   url.searchParams.set('client_id', CLIENT_ID);
@@ -126,6 +127,7 @@ export function startAntigravityOAuth(): { authUrl: string } {
   url.searchParams.set('code_challenge_method', 'S256');
   url.searchParams.set('access_type', 'offline');
   url.searchParams.set('prompt', 'consent');
+  url.searchParams.set('state', state);
 
   const server = http.createServer(async (req, res) => {
     if (!req.url?.startsWith('/oauth-callback')) {
@@ -136,6 +138,13 @@ export function startAntigravityOAuth(): { authUrl: string } {
 
     try {
       const callbackUrl = new URL(req.url, `http://localhost:${CALLBACK_PORT}`);
+
+      // Verify OAuth state parameter to prevent CSRF attacks
+      const returnedState = callbackUrl.searchParams.get('state');
+      if (returnedState !== state) {
+        throw new Error('OAuth state mismatch - possible CSRF attack');
+      }
+
       const code = callbackUrl.searchParams.get('code');
       if (!code) {
         throw new Error('No authorization code received');
@@ -219,13 +228,19 @@ export function startAntigravityOAuth(): { authUrl: string } {
     }
   });
 
-  server.listen(CALLBACK_PORT, '0.0.0.0', () => {
+  server.listen(CALLBACK_PORT, '127.0.0.1', () => {
     console.log(`[antigravity] OAuth callback server listening on port ${CALLBACK_PORT}`);
   });
 
-  server.on('error', (err) => {
-    console.error(`[antigravity] Callback server error:`, err);
-    writePendingResult({ status: 'error', error: `Failed to start callback server: ${err.message}` });
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      const msg = `Port ${CALLBACK_PORT} is already in use. Please close any other application using this port and try again.`;
+      console.error(`[antigravity] ${msg}`);
+      writePendingResult({ status: 'error', error: msg });
+    } else {
+      console.error(`[antigravity] Callback server error:`, err);
+      writePendingResult({ status: 'error', error: `Failed to start callback server: ${err.message}` });
+    }
     activeServer = null;
   });
 

@@ -40,8 +40,12 @@ export async function GET() {
     const envDetected = detectEnvVars();
     return NextResponse.json({ providers, env_detected: envDetected });
   } catch (error) {
+    console.error('[api/providers] GET error:', error);
+    const message = error instanceof Error ? error.message : 'Failed to get providers';
+    // Detect specific errors to give better messages
+    const isDbError = message.includes('not a valid Win32') || message.includes('MODULE_NOT_FOUND') || message.includes('better_sqlite3');
     return NextResponse.json<ErrorResponse>(
-      { error: error instanceof Error ? error.message : 'Failed to get providers' },
+      { error: isDbError ? `Database engine failed to load: ${message}` : message },
       { status: 500 }
     );
   }

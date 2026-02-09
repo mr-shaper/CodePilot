@@ -74,6 +74,15 @@ module.exports = async function afterPack(context) {
   const sourceStats = fs.statSync(rebuiltSource);
   console.log(`[afterPack] Rebuilt .node file: ${rebuiltSource} (${sourceStats.size} bytes, mtime: ${sourceStats.mtime.toISOString()})`);
 
+  // Validate rebuilt file size (must be at least 500KB to be a valid native module)
+  const MIN_VALID_SIZE = 500 * 1024; // 500KB
+  if (sourceStats.size < MIN_VALID_SIZE) {
+    throw new Error(
+      `[afterPack] Rebuilt better_sqlite3.node is too small (${sourceStats.size} bytes, minimum ${MIN_VALID_SIZE} bytes). ` +
+      `The file may be empty or corrupted. Build aborted.`
+    );
+  }
+
   // Step 3: Find and replace all better_sqlite3.node in standalone resources
   // macOS: <appOutDir>/CodePilot.app/Contents/Resources/standalone/...
   // Windows/Linux: <appOutDir>/resources/standalone/...
@@ -124,7 +133,6 @@ module.exports = async function afterPack(context) {
   if (replaced > 0) {
     console.log(`[afterPack] Successfully replaced ${replaced} better_sqlite3.node file(s) with Electron ABI build`);
   } else {
-    console.warn('[afterPack] WARNING: No better_sqlite3.node files found in standalone resources!');
     for (const root of searchRoots) {
       if (fs.existsSync(root)) {
         console.log(`[afterPack] Contents of ${root}:`, fs.readdirSync(root).slice(0, 20));
@@ -132,5 +140,6 @@ module.exports = async function afterPack(context) {
         console.log(`[afterPack] Path does not exist: ${root}`);
       }
     }
+    throw new Error('[afterPack] No better_sqlite3.node files found in standalone resources! Build aborted to prevent shipping incorrect ABI.');
   }
 };
