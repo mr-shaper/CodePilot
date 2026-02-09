@@ -25,7 +25,7 @@
 - 📊 **Token 用量追踪** -- 每次助手回复后查看输入/输出 Token 数量和预估费用
 - 🌓 **深色/浅色主题** -- 导航栏一键切换主题
 - 💻 **斜杠命令** -- 内置 `/help`、`/clear`、`/cost`、`/compact`、`/doctor`、`/review` 等命令
-- 🔑 **多种认证方式** -- Anthropic API Key、Claude 订阅 (OAuth)、Google Antigravity (Vertex AI)、AWS Bedrock、OpenRouter 及自定义提供商
+- 🔑 **多种认证方式** -- Anthropic API Key、Claude 订阅 (OAuth)、Google Antigravity (通过 Google 免费使用 Claude)、AWS Bedrock、OpenRouter 及自定义提供商
 - 📦 **Electron 打包** -- 原生桌面应用，隐藏标题栏，内置 Next.js 服务器，自动端口分配
 - 🪟 **Windows 原生支持** -- NSIS 安装包（x64 + arm64）、Windows 标题栏覆盖、含空格路径处理、Git Bash 自动检测
 
@@ -142,16 +142,16 @@ CodePilot 支持多种认证方式，在 **设置 > API Providers** 中配置。
 2. 输入你的 API Key（以 `sk-ant-...` 开头）。
 3. 点击 **Add Provider**，然后 **Apply** 激活。
 
-### 方式三：Google Antigravity (Vertex AI)
+### 方式三：Google Antigravity (免费 Claude 访问)
 
-通过 Google OAuth 使用 Google Vertex AI 访问 Claude 模型（包括 Opus 4.6）：
+通过 Google OAuth 免费使用 Claude 模型（包括 Opus 4.6），经由 Google Cloud Code Assist 网关：
 
 1. 前往 **设置 > API Providers**，点击 **Google Antigravity** 快捷按钮。
-2. 点击 **Login with Google** —— 浏览器将打开 Google 登录页。
+2. 点击 **Login with Google** —— 系统默认浏览器将打开 Google 登录页。
 3. 授权访问后，应用会自动接收 OAuth 令牌。
 4. 点击 **Add Provider**，然后 **Apply** 激活。
 
-> Antigravity 提供商会将 Google Application Default Credentials (ADC) 文件写入 `~/.codepilot/google-adc.json`，并使用 Vertex AI 模式与 Claude 通信。
+> CodePilot 内置代理服务器，自动将 Anthropic Messages API（Claude Code 使用）与 Google Antigravity 网关格式互相转换。账户凭证同时写入 `~/.config/antigravity-proxy/accounts.json`，与独立的 [antigravity-claude-proxy](https://github.com/badrisnarayanan/antigravity-claude-proxy) CLI 工具兼容。
 
 ### 方式四：其他提供商
 
@@ -210,7 +210,8 @@ codepilot/
 │   │   ├── claude-client.ts # Agent SDK 流式封装
 │   │   ├── db.ts            # SQLite 数据库、迁移、CRUD
 │   │   ├── files.ts         # 文件系统工具函数
-│   │   ├── antigravity.ts   # Google Antigravity OAuth + ADC 凭证
+│   │   ├── antigravity.ts   # Google Antigravity OAuth + 账户存储
+│   │   ├── antigravity-proxy.ts # Antigravity 本地代理（Anthropic ↔ Google 格式转换）
 │   │   ├── platform.ts      # 跨平台工具（路径、Shell、二进制文件检测）
 │   │   ├── permission-registry.ts  # 权限请求/响应桥接
 │   │   └── utils.ts         # 通用工具函数

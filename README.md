@@ -25,7 +25,7 @@
 - **📊 Token usage tracking** -- See input/output token counts and estimated cost after every assistant response.
 - **🌗 Dark / Light theme** -- One-click theme toggle in the navigation rail.
 - **⌨️ Slash commands** -- Built-in commands like `/help`, `/clear`, `/cost`, `/compact`, `/doctor`, `/review`, and more.
-- **🔑 Multiple auth methods** -- Anthropic API key, Claude subscription (OAuth), Google Antigravity (Vertex AI), AWS Bedrock, OpenRouter, and custom providers.
+- **🔑 Multiple auth methods** -- Anthropic API key, Claude subscription (OAuth), Google Antigravity (free Claude via Google), AWS Bedrock, OpenRouter, and custom providers.
 - **🖥️ Electron packaging** -- Ships as a native desktop app with a hidden title bar, bundled Next.js server, and automatic port allocation.
 - **🪟 Windows native support** -- NSIS installer for x64 and arm64, Windows titlebar overlay, path-with-spaces handling, Git Bash auto-detection.
 
@@ -144,16 +144,16 @@ If you have a Claude Pro, Max, or Team subscription:
 2. Enter your API key (starts with `sk-ant-...`).
 3. Click **Add Provider**, then **Apply**.
 
-### Option 3: Google Antigravity (Vertex AI)
+### Option 3: Google Antigravity (Free Claude Access)
 
-Use Google OAuth to access Claude models (including Opus 4.6) via Google Vertex AI:
+Use Google OAuth to access Claude models (including Opus 4.6) for free via Google's Cloud Code Assist gateway:
 
 1. Go to **Settings > API Providers** and click the **Google Antigravity** quick-add button.
-2. Click **Login with Google** -- your browser will open to Google's sign-in page.
+2. Click **Login with Google** -- your system default browser will open to Google's sign-in page.
 3. Authorize access. The app will automatically receive the OAuth tokens.
 4. Click **Add Provider**, then **Apply**.
 
-> The Antigravity provider writes a Google Application Default Credentials (ADC) file to `~/.codepilot/google-adc.json` and uses Vertex AI mode to communicate with Claude.
+> CodePilot runs a built-in proxy that translates between the Anthropic Messages API (used by Claude Code) and the Google Antigravity gateway format. Account credentials are also written to `~/.config/antigravity-proxy/accounts.json` for cross-compatibility with the standalone [antigravity-claude-proxy](https://github.com/badrisnarayanan/antigravity-claude-proxy) CLI tool.
 
 ### Option 4: Other Providers
 
@@ -212,7 +212,8 @@ codepilot/
 │   │   ├── claude-client.ts # Agent SDK streaming wrapper
 │   │   ├── db.ts            # SQLite schema, migrations, CRUD
 │   │   ├── files.ts         # File system helpers
-│   │   ├── antigravity.ts   # Google Antigravity OAuth + ADC
+│   │   ├── antigravity.ts   # Google Antigravity OAuth + account storage
+│   │   ├── antigravity-proxy.ts # Antigravity local proxy (Anthropic ↔ Google translation)
 │   │   ├── platform.ts      # Cross-platform helpers (paths, shell, binary detection)
 │   │   ├── permission-registry.ts  # Permission request/response bridge
 │   │   └── utils.ts         # Shared utilities
