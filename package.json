@@ -26,10 +26,12 @@
     "@streamdown/mermaid": "^1.0.1",
     "ai": "^6.0.73",
     "ansi-to-react": "^6.2.6",
+    "antigravity-claude-proxy": "^2.6.2",
     "better-sqlite3": "^12.6.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "electron-updater": "^6.6.2",
     "lucide-react": "^0.563.0",
     "motion": "^12.33.0",
     "nanoid": "^5.1.6",
@@ -46,7 +48,6 @@
     "streamdown": "^2.1.0",
     "tailwind-merge": "^3.4.0",
     "use-stick-to-bottom": "^1.1.2",
-    "electron-updater": "^6.6.2",
     "uuid": "^13.0.0"
   },
   "devDependencies": {

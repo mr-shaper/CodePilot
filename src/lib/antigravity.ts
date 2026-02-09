@@ -263,6 +263,72 @@ export function writeADCCredentials(refreshToken: string): string {
 }
 
 /**
+ * Write accounts.json for cross-compatibility with standalone antigravity-claude-proxy.
+ * Format: composite refresh token = refreshToken|projectId|projectId
+ * Path: ~/.config/antigravity-proxy/accounts.json
+ */
+export function writeProxyAccounts(refreshToken: string, projectId: string, email?: string): void {
+  try {
+    const configDir = path.join(os.homedir(), '.config', 'antigravity-proxy');
+    const configPath = path.join(configDir, 'accounts.json');
+
+    if (!fs.existsSync(configDir)) {
+      fs.mkdirSync(configDir, { recursive: true });
+    }
+
+    // Composite refresh token format: refreshToken|projectId|managedProjectId
+    const compositeToken = `${refreshToken}|${projectId}|${projectId}`;
+
+    // Read existing accounts to avoid duplicates
+    let existingConfig: { accounts: Array<Record<string, unknown>>; settings: Record<string, unknown>; activeIndex: number } = {
+      accounts: [],
+      settings: {},
+      activeIndex: 0,
+    };
+    try {
+      if (fs.existsSync(configPath)) {
+        existingConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      }
+    } catch {
+      // ignore parse errors, start fresh
+    }
+
+    // Check if account already exists (by email or refresh token prefix)
+    const accountEmail = email || 'codepilot@antigravity';
+    const existingIdx = existingConfig.accounts.findIndex(
+      (acc) => acc.email === accountEmail || (acc.refreshToken as string)?.startsWith(refreshToken.slice(0, 20)),
+    );
+
+    const account = {
+      email: accountEmail,
+      source: 'oauth',
+      enabled: true,
+      dbPath: null,
+      refreshToken: compositeToken,
+      projectId,
+      addedAt: new Date().toISOString(),
+      isInvalid: false,
+      invalidReason: null,
+      modelRateLimits: {},
+      lastUsed: null,
+      subscription: { tier: 'unknown', projectId: null, detectedAt: null },
+      quota: { models: {}, lastChecked: null },
+    };
+
+    if (existingIdx >= 0) {
+      existingConfig.accounts[existingIdx] = account;
+    } else {
+      existingConfig.accounts.push(account);
+    }
+
+    fs.writeFileSync(configPath, JSON.stringify(existingConfig, null, 2), { mode: 0o600 });
+    console.log(`[antigravity] Wrote proxy accounts.json with ${existingConfig.accounts.length} account(s)`);
+  } catch (err) {
+    console.warn('[antigravity] Failed to write proxy accounts.json:', err);
+  }
+}
+
+/**
  * Refresh an access token from a refresh token.
  * Used to verify the refresh token is still valid.
  */

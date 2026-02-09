@@ -22,7 +22,8 @@ import { registerPendingPermission } from './permission-registry';
 import { spawn } from 'child_process';
 import { getSetting, getActiveProvider } from './db';
 import { findClaudeBinary, findGitBash, getExpandedPath, normalizeStdioCommand } from './platform';
-import { writeADCCredentials } from './antigravity';
+import { refreshAccessToken, writeProxyAccounts } from './antigravity';
+import { startAntigravityProxy, fetchAntigravityProjectId } from './antigravity-proxy';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
@@ -257,23 +258,41 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
             // ignore malformed extra_env
           }
 
-          // Antigravity provider: write ADC credentials file for Vertex AI auth
+          // Antigravity provider: start local proxy that translates Anthropic ↔ Gemini format
           if (activeProvider.provider_type === 'antigravity' && activeProvider.api_key) {
             try {
-              const adcPath = writeADCCredentials(activeProvider.api_key);
-              sdkEnv.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
-              // Ensure Vertex AI mode is enabled
-              sdkEnv.CLAUDE_CODE_USE_VERTEX = '1';
-              if (!sdkEnv.CLOUD_ML_REGION) {
-                sdkEnv.CLOUD_ML_REGION = 'us-east5';
+              // Refresh the access token first
+              const tokenResult = await refreshAccessToken(activeProvider.api_key);
+              if (!tokenResult) {
+                throw new Error('Failed to refresh Antigravity access token. Please re-authenticate.');
               }
-              // Remove any ANTHROPIC keys that would conflict with Vertex AI mode
-              delete sdkEnv.ANTHROPIC_API_KEY;
-              delete sdkEnv.ANTHROPIC_AUTH_TOKEN;
-              delete sdkEnv.ANTHROPIC_BASE_URL;
-              console.log(`[claude-client] Antigravity: wrote ADC to ${adcPath}, using Vertex AI region ${sdkEnv.CLOUD_ML_REGION}`);
+
+              // Fetch the GCP project ID from Antigravity backend
+              const projectId = await fetchAntigravityProjectId(tokenResult.accessToken);
+              console.log(`[claude-client] Antigravity project ID: ${projectId}`);
+
+              // Write proxy accounts.json for cross-compatibility with standalone antigravity-claude-proxy
+              writeProxyAccounts(activeProvider.api_key, projectId);
+
+              // Start the local proxy server
+              const proxyBaseUrl = await startAntigravityProxy(
+                activeProvider.api_key,
+                tokenResult.accessToken,
+                projectId,
+                tokenResult.expiresIn,
+              );
+
+              // Point Claude Code at our proxy (standard Anthropic API format)
+              sdkEnv.ANTHROPIC_BASE_URL = proxyBaseUrl;
+              // Set a dummy API key (proxy handles auth, but Claude Code requires one)
+              sdkEnv.ANTHROPIC_API_KEY = 'antigravity-proxy';
+              // Remove Vertex AI flags
+              delete sdkEnv.CLAUDE_CODE_USE_VERTEX;
+              delete sdkEnv.CLOUD_ML_REGION;
+              delete sdkEnv.GOOGLE_APPLICATION_CREDENTIALS;
+              console.log(`[claude-client] Antigravity proxy running at ${proxyBaseUrl}`);
             } catch (err) {
-              console.error('[claude-client] Failed to write ADC credentials:', err);
+              console.error('[claude-client] Antigravity proxy setup failed:', err);
             }
           }
         } else {

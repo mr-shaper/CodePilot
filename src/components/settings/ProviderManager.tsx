@@ -38,7 +38,7 @@ const QUICK_PRESETS = [
   { name: "MiniMax (Global)", provider_type: "custom", base_url: "https://api.minimax.io/anthropic", extra_env: '{"API_TIMEOUT_MS":"3000000","CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1","ANTHROPIC_API_KEY":""}' },
   { name: "AWS Bedrock", provider_type: "bedrock", base_url: "" },
   { name: "Google Vertex", provider_type: "vertex", base_url: "" },
-  { name: "Google Antigravity", provider_type: "antigravity", base_url: "", extra_env: '{"CLAUDE_CODE_USE_VERTEX":"1","CLOUD_ML_REGION":"us-east5"}' },
+  { name: "Google Antigravity", provider_type: "antigravity", base_url: "" },
   { name: "LiteLLM", provider_type: "custom", base_url: "http://localhost:4000" },
 ];
 
