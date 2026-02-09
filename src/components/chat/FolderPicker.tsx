@@ -107,7 +107,7 @@ export function FolderPicker({ open, onOpenChange, onSelect, initialPath }: Fold
           <Input
             value={pathInput}
             onChange={(e) => setPathInput(e.target.value)}
-            placeholder="/path/to/project"
+            placeholder={typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows') ? 'C:\\path\\to\\project' : '/path/to/project'}
             className="flex-1 font-mono text-sm"
           />
           <Button type="submit" variant="outline" size="sm">

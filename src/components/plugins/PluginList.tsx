@@ -6,6 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { PluginCard, type SkillInfo } from './PluginCard';
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Search01Icon, GlobeIcon, FolderOpenIcon, Plug01Icon } from "@hugeicons/core-free-icons";
+import { getHomeHint } from '@/lib/path-utils';
 
 interface PluginListProps {
   plugins: SkillInfo[];
@@ -74,7 +75,7 @@ export function PluginList({ plugins, onSelect }: PluginListProps) {
               </p>
               <p className="text-xs mt-1">
                 {plugins.length === 0
-                  ? 'Add .md files to ~/.claude/commands/ or .claude/commands/ to create skills'
+                  ? `Add .md files to ${getHomeHint()} to create skills`
                   : 'Try adjusting your search or filter'}
               </p>
             </div>

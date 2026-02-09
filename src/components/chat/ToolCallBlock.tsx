@@ -16,6 +16,7 @@ import {
   CancelCircleIcon,
 } from "@hugeicons/core-free-icons";
 import { cn } from '@/lib/utils';
+import { splitPath } from '@/lib/path-utils';
 import { CodeBlock } from './CodeBlock';
 
 type ToolStatus = 'running' | 'success' | 'error';
@@ -85,7 +86,7 @@ function getToolSummary(name: string, input: unknown, category: ReturnType<typeo
 }
 
 function extractFilename(path: string): string {
-  const parts = path.split('/');
+  const parts = splitPath(path);
   return parts[parts.length - 1] || path;
 }
 

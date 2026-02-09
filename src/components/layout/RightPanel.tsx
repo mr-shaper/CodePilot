@@ -14,6 +14,11 @@ import { usePanel } from "@/hooks/usePanel";
 import { FileTree } from "@/components/project/FileTree";
 import { FilePreview } from "@/components/project/FilePreview";
 
+// Windows Electron has titlebar overlay buttons (min/max/close) at the top-right
+const isWindowsElectron = typeof window !== 'undefined' &&
+  !!(window as any).electronAPI &&
+  navigator.userAgent.includes('Windows');
+
 export function RightPanel() {
   const { panelOpen, setPanelOpen, workingDirectory, sessionId, sessionTitle, setSessionTitle } = usePanel();
   const [previewPath, setPreviewPath] = useState<string | null>(null);
@@ -67,6 +72,8 @@ export function RightPanel() {
   if (!panelOpen) {
     return (
       <div className="flex flex-col items-center gap-2 bg-background p-2">
+        {/* Spacer for Windows titlebar overlay buttons */}
+        {isWindowsElectron && <div className="h-11 shrink-0" />}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -94,6 +101,8 @@ export function RightPanel() {
 
   return (
     <aside className="hidden h-full w-72 shrink-0 flex-col overflow-hidden bg-background lg:flex">
+      {/* Spacer for Windows titlebar overlay buttons */}
+      <div className="h-11 shrink-0 electron-win-only" />
       {/* Header */}
       <div className="flex h-10 shrink-0 items-center justify-between px-4">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Chat Info</span>

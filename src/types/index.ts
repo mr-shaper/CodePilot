@@ -100,7 +100,7 @@ export interface Setting {
 export interface ApiProvider {
   id: string;
   name: string;
-  provider_type: string; // 'anthropic' | 'openrouter' | 'bedrock' | 'vertex' | 'custom'
+  provider_type: string; // 'anthropic' | 'openrouter' | 'bedrock' | 'vertex' | 'antigravity' | 'custom'
   base_url: string;
   api_key: string;
   is_active: number; // SQLite boolean: 0 or 1

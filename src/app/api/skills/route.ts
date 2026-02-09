@@ -11,8 +11,15 @@ interface SkillFile {
   filePath: string;
 }
 
-function getGlobalCommandsDir(): string {
-  return path.join(os.homedir(), ".claude", "commands");
+function getGlobalCommandsDirs(): string[] {
+  const dirs = [path.join(os.homedir(), ".claude", "commands")];
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA;
+    if (appData) {
+      dirs.push(path.join(appData, '.claude', 'commands'));
+    }
+  }
+  return [...new Set(dirs)]; // deduplicate if homedir == appdata parent
 }
 
 function getProjectCommandsDir(cwd?: string): string {
@@ -44,8 +51,15 @@ function getPluginCommandsDirs(): string[] {
   return dirs;
 }
 
-function getInstalledSkillsDir(): string {
-  return path.join(os.homedir(), ".agents", "skills");
+function getInstalledSkillsDirs(): string[] {
+  const dirs = [path.join(os.homedir(), ".agents", "skills")];
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA;
+    if (appData) {
+      dirs.push(path.join(appData, '.agents', 'skills'));
+    }
+  }
+  return [...new Set(dirs)]; // deduplicate
 }
 
 /**
@@ -102,31 +116,39 @@ function parseSkillFrontMatter(content: string): { name?: string; description?: 
  */
 function scanInstalledSkills(): SkillFile[] {
   const skills: SkillFile[] = [];
-  const dir = getInstalledSkillsDir();
-  if (!fs.existsSync(dir)) return skills;
+  const seen = new Set<string>();
 
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-      const skillMdPath = path.join(dir, entry.name, "SKILL.md");
-      if (!fs.existsSync(skillMdPath)) continue;
+  for (const dir of getInstalledSkillsDirs()) {
+    if (!fs.existsSync(dir)) continue;
 
-      const content = fs.readFileSync(skillMdPath, "utf-8");
-      const meta = parseSkillFrontMatter(content);
-      const name = meta.name || entry.name;
-      const description = meta.description || `Installed skill: /${name}`;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        const skillMdPath = path.join(dir, entry.name, "SKILL.md");
+        if (!fs.existsSync(skillMdPath)) continue;
 
-      skills.push({
-        name,
-        description,
-        content,
-        source: "installed",
-        filePath: skillMdPath,
-      });
+        const content = fs.readFileSync(skillMdPath, "utf-8");
+        const meta = parseSkillFrontMatter(content);
+        const name = meta.name || entry.name;
+
+        // Deduplicate skills found in multiple directories
+        if (seen.has(name)) continue;
+        seen.add(name);
+
+        const description = meta.description || `Installed skill: /${name}`;
+
+        skills.push({
+          name,
+          description,
+          content,
+          source: "installed",
+          filePath: skillMdPath,
+        });
+      }
+    } catch {
+      // ignore read errors
     }
-  } catch {
-    // ignore read errors
   }
   return skills;
 }
@@ -174,14 +196,27 @@ export async function GET(request: NextRequest) {
   try {
     // Accept optional cwd query param for project-level skills
     const cwd = request.nextUrl.searchParams.get("cwd") || undefined;
-    const globalDir = getGlobalCommandsDir();
+    const globalDirs = getGlobalCommandsDirs();
     const projectDir = getProjectCommandsDir(cwd);
 
-    console.log(`[skills] Scanning global: ${globalDir} (exists: ${fs.existsSync(globalDir)})`);
+    for (const gd of globalDirs) {
+      console.log(`[skills] Scanning global: ${gd} (exists: ${fs.existsSync(gd)})`);
+    }
     console.log(`[skills] Scanning project: ${projectDir} (exists: ${fs.existsSync(projectDir)})`);
     console.log(`[skills] HOME=${process.env.HOME}, homedir=${os.homedir()}`);
 
-    const globalSkills = scanDirectory(globalDir, "global");
+    // Scan all global directories and deduplicate by skill name
+    const globalSkills: SkillFile[] = [];
+    const seenGlobalNames = new Set<string>();
+    for (const gd of globalDirs) {
+      for (const skill of scanDirectory(gd, "global")) {
+        if (!seenGlobalNames.has(skill.name)) {
+          seenGlobalNames.add(skill.name);
+          globalSkills.push(skill);
+        }
+      }
+    }
+
     const projectSkills = scanDirectory(projectDir, "project");
     const installedSkills = scanInstalledSkills();
 
@@ -230,7 +265,7 @@ export async function POST(request: Request) {
     }
 
     const dir =
-      scope === "project" ? getProjectCommandsDir() : getGlobalCommandsDir();
+      scope === "project" ? getProjectCommandsDir() : getGlobalCommandsDirs()[0];
 
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });

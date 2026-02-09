@@ -4,18 +4,36 @@ import path from 'path';
 import os from 'os';
 import type { ErrorResponse } from '@/types';
 
-function getWindowsDrives(): string[] {
+let driveCache: { drives: string[]; timestamp: number } | null = null;
+const DRIVE_CACHE_TTL = 30000; // 30 seconds
+
+async function getWindowsDrives(): Promise<string[]> {
   if (process.platform !== 'win32') return [];
-  const drives: string[] = [];
+
+  // Return cached result if fresh
+  if (driveCache && Date.now() - driveCache.timestamp < DRIVE_CACHE_TTL) {
+    return driveCache.drives;
+  }
+
+  const checks: Promise<string | null>[] = [];
   for (let i = 65; i <= 90; i++) {
     const drive = String.fromCharCode(i) + ':\\';
-    try {
-      fs.accessSync(drive);
-      drives.push(drive);
-    } catch {
-      // drive not available
-    }
+    checks.push(
+      new Promise<string | null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), 500); // 500ms timeout per drive
+        fs.access(drive, (err) => {
+          clearTimeout(timer);
+          resolve(err ? null : drive);
+        });
+      })
+    );
   }
+
+  const results = await Promise.all(checks);
+  const drives = results.filter((d): d is string => d !== null);
+
+  // Cache result
+  driveCache = { drives, timestamp: Date.now() };
   return drives;
 }
 
@@ -43,7 +61,7 @@ export async function GET(request: NextRequest) {
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
-    const drives = getWindowsDrives();
+    const drives = await getWindowsDrives();
 
     return NextResponse.json({
       current: resolvedDir,

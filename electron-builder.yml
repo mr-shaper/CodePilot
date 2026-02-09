@@ -1,5 +1,9 @@
 appId: com.codepilot.app
 productName: CodePilot
+publish:
+  provider: github
+  owner: mr-shaper
+  repo: CodePilot
 directories:
   output: release
 files:
@@ -48,6 +52,10 @@ mac:
       arch: [arm64, x64]
 win:
   icon: build/icon.ico
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+  # Code signing: set CSC_LINK and CSC_KEY_PASSWORD env vars in CI
+  # Uses signtoolOptions for Windows signing configuration
+  # See: https://www.electron.build/win
   target:
     - target: nsis
       arch: [x64, arm64]
@@ -57,6 +65,9 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  shortcutName: CodePilot
+  uninstallDisplayName: CodePilot
+  include: scripts/installer.nsh
 linux:
   icon: build/icon.png
   category: Development

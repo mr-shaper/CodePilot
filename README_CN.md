@@ -25,7 +25,9 @@
 - 📊 **Token 用量追踪** -- 每次助手回复后查看输入/输出 Token 数量和预估费用
 - 🌓 **深色/浅色主题** -- 导航栏一键切换主题
 - 💻 **斜杠命令** -- 内置 `/help`、`/clear`、`/cost`、`/compact`、`/doctor`、`/review` 等命令
+- 🔑 **多种认证方式** -- Anthropic API Key、Claude 订阅 (OAuth)、Google Antigravity (Vertex AI)、AWS Bedrock、OpenRouter 及自定义提供商
 - 📦 **Electron 打包** -- 原生桌面应用，隐藏标题栏，内置 Next.js 服务器，自动端口分配
+- 🪟 **Windows 原生支持** -- NSIS 安装包（x64 + arm64）、Windows 标题栏覆盖、含空格路径处理、Git Bash 自动检测
 
 ## 📸 截图
 
@@ -73,7 +75,7 @@ npm run electron:dev
 ### 支持平台
 
 - **macOS** -- 支持 arm64（Apple Silicon）和 x64（Intel）架构的 `.dmg` 安装包
-- **Windows** -- 提供 `.zip` 压缩包，解压即用
+- **Windows** -- 提供 x64 和 arm64 NSIS 安装程序 (`.exe`)，以及通用安装包
 - **Linux** -- 支持 x64 和 arm64 架构，提供 `.AppImage`、`.deb` 和 `.rpm` 格式
 
 ---
@@ -120,6 +122,40 @@ Windows SmartScreen 会阻止安装程序或可执行文件。
 
 1. 打开 **设置** > **应用** > **高级应用设置**
 2. 将 **应用安装控制**（或"选择获取应用的位置"）切换为允许任何来源
+
+---
+
+## 🔐 认证方式
+
+CodePilot 支持多种认证方式，在 **设置 > API Providers** 中配置。
+
+### 方式一：Claude 订阅（推荐）
+
+如果你有 Claude Pro、Max 或 Team 订阅：
+
+1. 确保已安装 `claude` CLI，在终端中运行 `claude login` 完成登录。
+2. 无需配置 Provider，CodePilot 会自动使用你的订阅。
+
+### 方式二：Anthropic API Key
+
+1. 前往 **设置 > API Providers**，点击 **Anthropic** 快捷按钮。
+2. 输入你的 API Key（以 `sk-ant-...` 开头）。
+3. 点击 **Add Provider**，然后 **Apply** 激活。
+
+### 方式三：Google Antigravity (Vertex AI)
+
+通过 Google OAuth 使用 Google Vertex AI 访问 Claude 模型（包括 Opus 4.6）：
+
+1. 前往 **设置 > API Providers**，点击 **Google Antigravity** 快捷按钮。
+2. 点击 **Login with Google** —— 浏览器将打开 Google 登录页。
+3. 授权访问后，应用会自动接收 OAuth 令牌。
+4. 点击 **Add Provider**，然后 **Apply** 激活。
+
+> Antigravity 提供商会将 Google Application Default Credentials (ADC) 文件写入 `~/.codepilot/google-adc.json`，并使用 Vertex AI 模式与 Claude 通信。
+
+### 方式四：其他提供商
+
+同时支持 AWS Bedrock、OpenRouter、Google Vertex（手动配置）及自定义 API 端点。
 
 ---
 
@@ -174,6 +210,8 @@ codepilot/
 │   │   ├── claude-client.ts # Agent SDK 流式封装
 │   │   ├── db.ts            # SQLite 数据库、迁移、CRUD
 │   │   ├── files.ts         # 文件系统工具函数
+│   │   ├── antigravity.ts   # Google Antigravity OAuth + ADC 凭证
+│   │   ├── platform.ts      # 跨平台工具（路径、Shell、二进制文件检测）
 │   │   ├── permission-registry.ts  # 权限请求/响应桥接
 │   │   └── utils.ts         # 通用工具函数
 │   └── types/               # TypeScript 接口和 API 类型定义
@@ -202,6 +240,9 @@ npm run electron:build
 
 # 打包 macOS DMG
 npm run electron:pack
+
+# 打包 Windows NSIS 安装程序（x64 + arm64）
+npm run electron:pack:win
 ```
 
 ### 说明

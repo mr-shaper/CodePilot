@@ -21,15 +21,24 @@ export function getDb(): Database.Database {
     if (!fs.existsSync(DB_PATH)) {
       const home = os.homedir();
       const oldPaths = [
-        // Old Electron userData paths (app.getPath('userData'))
+        // Old Electron userData paths (app.getPath('userData')) — macOS
         path.join(home, 'Library', 'Application Support', 'CodePilot', 'codepilot.db'),
         path.join(home, 'Library', 'Application Support', 'codepilot', 'codepilot.db'),
         path.join(home, 'Library', 'Application Support', 'Claude GUI', 'codepilot.db'),
-        // Old dev-mode fallback
-        path.join(process.cwd(), 'data', 'codepilot.db'),
-        // Legacy name
+        // Legacy name — macOS
         path.join(home, 'Library', 'Application Support', 'CodePilot', 'claude-gui.db'),
         path.join(home, 'Library', 'Application Support', 'codepilot', 'claude-gui.db'),
+        // Windows AppData paths
+        path.join(home, 'AppData', 'Roaming', 'CodePilot', 'codepilot.db'),
+        path.join(home, 'AppData', 'Roaming', 'codepilot', 'codepilot.db'),
+        path.join(home, 'AppData', 'Roaming', 'Claude GUI', 'codepilot.db'),
+        path.join(home, 'AppData', 'Roaming', 'CodePilot', 'claude-gui.db'),
+        path.join(home, 'AppData', 'Roaming', 'codepilot', 'claude-gui.db'),
+        // Linux XDG config paths
+        path.join(home, '.config', 'CodePilot', 'codepilot.db'),
+        path.join(home, '.config', 'codepilot', 'codepilot.db'),
+        // Old dev-mode fallback
+        path.join(process.cwd(), 'data', 'codepilot.db'),
       ];
       for (const oldPath of oldPaths) {
         if (fs.existsSync(oldPath)) {
@@ -135,14 +144,15 @@ function migrateDb(db: Database.Database): void {
   if (!colNames.includes('project_name')) {
     db.exec("ALTER TABLE chat_sessions ADD COLUMN project_name TEXT NOT NULL DEFAULT ''");
     // Backfill project_name from working_directory for existing rows
-    db.exec(`
-      UPDATE chat_sessions
-      SET project_name = CASE
-        WHEN working_directory != '' THEN REPLACE(REPLACE(working_directory, RTRIM(working_directory, REPLACE(working_directory, '/', '')), ''), '/', '')
-        ELSE ''
-      END
-      WHERE project_name = ''
-    `);
+    // Use path.basename() in JS to handle both Unix '/' and Windows '\' separators
+    const rows = db.prepare(
+      "SELECT id, working_directory FROM chat_sessions WHERE project_name = '' AND working_directory != ''"
+    ).all() as { id: string; working_directory: string }[];
+    const updateStmt = db.prepare('UPDATE chat_sessions SET project_name = ? WHERE id = ?');
+    for (const row of rows) {
+      const projectName = path.basename(row.working_directory);
+      updateStmt.run(projectName, row.id);
+    }
   }
   if (!colNames.includes('status')) {
     db.exec("ALTER TABLE chat_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");

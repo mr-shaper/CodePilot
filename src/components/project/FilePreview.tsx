@@ -9,6 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import type { FilePreview as FilePreviewType } from "@/types";
+import { splitPath } from "@/lib/path-utils";
 
 interface FilePreviewProps {
   filePath: string;
@@ -52,10 +53,10 @@ export function FilePreview({ filePath, onBack }: FilePreviewProps) {
   };
 
   // Extract filename from path
-  const fileName = filePath.split("/").pop() || filePath;
+  const segments = splitPath(filePath);
+  const fileName = segments[segments.length - 1] || filePath;
 
-  // Build breadcrumb segments
-  const segments = filePath.split("/").filter(Boolean);
+  // Build breadcrumb segments (already computed above)
   const displaySegments = segments.slice(-3); // show last 3 segments
 
   return (

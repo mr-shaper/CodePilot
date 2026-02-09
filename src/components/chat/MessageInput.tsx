@@ -15,6 +15,7 @@ import {
   Cancel01Icon,
 } from "@hugeicons/core-free-icons";
 import { cn } from '@/lib/utils';
+import { getBasename } from '@/lib/path-utils';
 import { FolderPicker } from './FolderPicker';
 import {
   PromptInput,
@@ -675,7 +676,7 @@ export function MessageInput({
   const currentMode = MODE_OPTIONS.find((m) => m.value === mode) || MODE_OPTIONS[0];
 
   const folderShortName = workingDirectory
-    ? workingDirectory.split('/').filter(Boolean).pop() || workingDirectory
+    ? getBasename(workingDirectory)
     : '';
 
   // Map isStreaming to ChatStatus for PromptInputSubmit

@@ -16,10 +16,13 @@ import type {
   PostToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeStreamOptions, SSEEvent, TokenUsage, MCPServerConfig, PermissionRequestEvent, FileAttachment } from '@/types';
+import type { SpawnOptions as SDKSpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { isImageFile } from '@/types';
 import { registerPendingPermission } from './permission-registry';
+import { spawn } from 'child_process';
 import { getSetting, getActiveProvider } from './db';
-import { findClaudeBinary, findGitBash, getExpandedPath } from './platform';
+import { findClaudeBinary, findGitBash, getExpandedPath, normalizeStdioCommand } from './platform';
+import { writeADCCredentials } from './antigravity';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
@@ -83,11 +86,15 @@ function toSdkMcpConfig(
           console.warn(`[mcp] stdio server "${name}" is missing command, skipping`);
           continue;
         }
+        const normalized = normalizeStdioCommand(config.command);
         const stdioConfig: McpStdioServerConfig = {
-          command: config.command,
+          command: normalized.command,
           args: config.args,
           env: config.env,
         };
+        if (normalized.shell) {
+          (stdioConfig as McpStdioServerConfig & { shell?: boolean }).shell = true;
+        }
         result[name] = stdioConfig;
         break;
       }
@@ -139,11 +146,31 @@ function extractTokenUsage(msg: SDKResultMessage): TokenUsage | null {
  * and return the file paths. The files are placed in .codepilot-uploads/
  * under the working directory so Claude's Read tool can access them.
  */
-function saveUploadedFiles(files: FileAttachment[], workDir: string): string[] {
-  const uploadDir = path.join(workDir, '.codepilot-uploads');
-  if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
+/**
+ * Determine the upload directory, falling back to the system temp directory
+ * if the primary location (under workDir) is not writable (e.g. read-only drive).
+ */
+function getUploadDir(workDir: string): string {
+  const primary = path.join(workDir, '.codepilot-uploads');
+  try {
+    if (!fs.existsSync(primary)) {
+      fs.mkdirSync(primary, { recursive: true });
+    }
+    // Verify writable
+    fs.accessSync(primary, fs.constants.W_OK);
+    return primary;
+  } catch {
+    // Fallback to temp directory
+    const fallback = path.join(os.tmpdir(), 'codepilot-uploads');
+    if (!fs.existsSync(fallback)) {
+      fs.mkdirSync(fallback, { recursive: true });
+    }
+    return fallback;
   }
+}
+
+function saveUploadedFiles(files: FileAttachment[], workDir: string): string[] {
+  const uploadDir = getUploadDir(workDir);
   const savedPaths: string[] = [];
   for (const file of files) {
     // Sanitize filename to prevent directory traversal
@@ -195,7 +222,7 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
         // Try to get config from active provider first
         const activeProvider = getActiveProvider();
 
-        if (activeProvider && activeProvider.api_key) {
+        if (activeProvider) {
           // Clear all existing ANTHROPIC_* variables to prevent conflicts
           for (const key of Object.keys(sdkEnv)) {
             if (key.startsWith('ANTHROPIC_')) {
@@ -203,9 +230,12 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
             }
           }
 
-          // Inject provider config — set both token variants so extra_env can clear the unwanted one
-          sdkEnv.ANTHROPIC_AUTH_TOKEN = activeProvider.api_key;
-          sdkEnv.ANTHROPIC_API_KEY = activeProvider.api_key;
+          // Inject API key if provided; subscription/OAuth users may leave this empty
+          // (Claude CLI uses stored OAuth credentials from `claude login`)
+          if (activeProvider.api_key) {
+            sdkEnv.ANTHROPIC_AUTH_TOKEN = activeProvider.api_key;
+            sdkEnv.ANTHROPIC_API_KEY = activeProvider.api_key;
+          }
           if (activeProvider.base_url) {
             sdkEnv.ANTHROPIC_BASE_URL = activeProvider.base_url;
           }
@@ -225,6 +255,26 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
             }
           } catch {
             // ignore malformed extra_env
+          }
+
+          // Antigravity provider: write ADC credentials file for Vertex AI auth
+          if (activeProvider.provider_type === 'antigravity' && activeProvider.api_key) {
+            try {
+              const adcPath = writeADCCredentials(activeProvider.api_key);
+              sdkEnv.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+              // Ensure Vertex AI mode is enabled
+              sdkEnv.CLAUDE_CODE_USE_VERTEX = '1';
+              if (!sdkEnv.CLOUD_ML_REGION) {
+                sdkEnv.CLOUD_ML_REGION = 'us-east5';
+              }
+              // Remove any ANTHROPIC keys that would conflict with Vertex AI mode
+              delete sdkEnv.ANTHROPIC_API_KEY;
+              delete sdkEnv.ANTHROPIC_AUTH_TOKEN;
+              delete sdkEnv.ANTHROPIC_BASE_URL;
+              console.log(`[claude-client] Antigravity: wrote ADC to ${adcPath}, using Vertex AI region ${sdkEnv.CLOUD_ML_REGION}`);
+            } catch (err) {
+              console.error('[claude-client] Failed to write ADC credentials:', err);
+            }
           }
         } else {
           // No active provider — check legacy DB settings first, then fall back to
@@ -257,6 +307,34 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
         const claudePath = findClaudePath();
         if (claudePath) {
           queryOptions.pathToClaudeCodeExecutable = claudePath;
+
+          // On Windows, .cmd files need shell:true (can't spawn directly → EINVAL).
+          // But shell:true via cmd.exe has two pitfalls:
+          //   1. Unquoted command paths with spaces are split at the space
+          //   2. Empty string arguments ("") are silently dropped by cmd.exe
+          // Fix: build the full command string ourselves with proper quoting,
+          // then pass as a single string to spawn (no args array).
+          if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(claudePath)) {
+            queryOptions.spawnClaudeCodeProcess = (spawnOpts: SDKSpawnOptions) => {
+              const quotedArgs = spawnOpts.args.map(arg => {
+                if (arg === '') return '""';
+                if (arg.includes(' ') || arg.includes('"') || arg.includes('&') || arg.includes('^')) {
+                  return `"${arg.replace(/"/g, '\\\"')}"`;
+                }
+                return arg;
+              });
+              const fullCmd = `"${spawnOpts.command}" ${quotedArgs.join(' ')}`;
+              const child = spawn(fullCmd, [], {
+                cwd: spawnOpts.cwd,
+                env: spawnOpts.env as NodeJS.ProcessEnv,
+                signal: spawnOpts.signal,
+                shell: true,
+                stdio: ['pipe', 'pipe', 'pipe'],
+                windowsVerbatimArguments: true,
+              });
+              return child;
+            };
+          }
         }
 
         if (model) {

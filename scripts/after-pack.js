@@ -40,6 +40,7 @@ module.exports = async function afterPack(context) {
       cwd: projectDir,
       stdio: 'inherit',
       timeout: 120000,
+      shell: true, // Required on Windows to resolve npx.cmd
     });
     console.log('[afterPack] Rebuild completed successfully');
   } catch (err) {
@@ -76,11 +77,26 @@ module.exports = async function afterPack(context) {
   // Step 3: Find and replace all better_sqlite3.node in standalone resources
   // macOS: <appOutDir>/CodePilot.app/Contents/Resources/standalone/...
   // Windows/Linux: <appOutDir>/resources/standalone/...
-  const searchRoots = [
-    path.join(appOutDir, 'CodePilot.app', 'Contents', 'Resources', 'standalone'),
+  let searchRoots;
+  if (platform === 'mac') {
+    searchRoots = [
+      path.join(appOutDir, 'CodePilot.app', 'Contents', 'Resources', 'standalone'),
+    ];
+  } else {
+    // Windows and Linux share the same layout
+    searchRoots = [
+      path.join(appOutDir, 'resources', 'standalone'),
+    ];
+  }
+  // Keep fallbacks for safety
+  searchRoots.push(
     path.join(appOutDir, 'Contents', 'Resources', 'standalone'),
-    path.join(appOutDir, 'resources', 'standalone'),
-  ];
+  );
+
+  console.log(`[afterPack] Platform: ${platform}, search roots (in order):`);
+  searchRoots.forEach((root, i) => {
+    console.log(`[afterPack]   ${i + 1}. ${root}`);
+  });
 
   let replaced = 0;
 

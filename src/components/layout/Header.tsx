@@ -19,6 +19,15 @@ export function Header() {
     setMounted(true);
   }, []);
 
+  // Notify Electron to update titlebar overlay when theme changes
+  useEffect(() => {
+    if (!mounted) return;
+    const isDark = theme === "dark";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const api = (window as any).electronAPI;
+    api?.setTitleBarTheme?.(isDark);
+  }, [theme, mounted]);
+
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border/50 bg-background px-4">
       <div className="ml-auto flex items-center gap-2">

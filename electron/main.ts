@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeImage, dialog, session, utilityProcess } from 'electron';
+import { app, BrowserWindow, nativeImage, dialog, session, utilityProcess, ipcMain, shell } from 'electron';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -78,9 +78,28 @@ function checkNativeModuleABI(): void {
  * .zshrc/.bashrc (e.g. API keys, nvm PATH).
  */
 function loadUserShellEnv(): Record<string, string> {
-  // Windows GUI apps inherit the full user environment
+  // Windows: read latest user environment variables from the registry
+  // so that newly added vars (e.g. ANTHROPIC_API_KEY) are available
+  // even without restarting Explorer
   if (process.platform === 'win32') {
-    return {};
+    try {
+      const result = execFileSync('reg', [
+        'query', 'HKCU\\Environment'
+      ], { timeout: 5000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      const env: Record<string, string> = {};
+      for (const line of result.split('\n')) {
+        const match = line.match(/^\s+(\S+)\s+REG_(?:SZ|EXPAND_SZ)\s+(.+)/);
+        if (match) {
+          let value = match[2].trim();
+          // Expand %VAR% references
+          value = value.replace(/%([^%]+)%/g, (_, v) => process.env[v] || '');
+          env[match[1]] = value;
+        }
+      }
+      return env;
+    } catch {
+      return {};
+    }
   }
   try {
     const shell = process.env.SHELL || '/bin/zsh';
@@ -284,6 +303,49 @@ function createWindow(port: number) {
   });
 }
 
+// Open URL in system default browser (not Electron's Chromium)
+ipcMain.on('open-external', (_, url: string) => {
+  if (typeof url === 'string' && (url.startsWith('https://') || url.startsWith('http://'))) {
+    shell.openExternal(url);
+  }
+});
+
+// titleBar theme IPC -- registered once outside createWindow to avoid duplicate listeners
+ipcMain.on('set-titlebar-theme', (_, isDark: boolean) => {
+  if (mainWindow && process.platform === 'win32') {
+    mainWindow.setTitleBarOverlay({
+      color: '#00000000',
+      symbolColor: isDark ? '#cccccc' : '#333333',
+      height: 44,
+    });
+  }
+});
+
+// Single instance lock: prevent multiple instances when opened via context menu
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_, commandLine) => {
+    // Focus existing window
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+      // Parse folder path from command line and send to renderer
+      const folderPath = commandLine.find(arg =>
+        !arg.startsWith('-') &&
+        arg !== process.execPath &&
+        !arg.includes('electron') &&
+        fs.existsSync(arg) &&
+        fs.statSync(arg).isDirectory()
+      );
+      if (folderPath) {
+        mainWindow.webContents.send('open-folder', folderPath);
+      }
+    }
+  });
+}
+
 app.whenReady().then(async () => {
   // Load user's full shell environment (API keys, PATH, etc.)
   userShellEnv = loadUserShellEnv();
@@ -313,8 +375,15 @@ app.whenReady().then(async () => {
 
   // Set macOS Dock icon
   if (process.platform === 'darwin' && app.dock) {
-    const iconPath = getIconPath();
-    app.dock.setIcon(nativeImage.createFromPath(iconPath));
+    try {
+      const iconPath = getIconPath();
+      const icon = nativeImage.createFromPath(iconPath);
+      if (!icon.isEmpty()) {
+        app.dock.setIcon(icon);
+      }
+    } catch (err) {
+      console.warn('Failed to set Dock icon:', err);
+    }
   }
 
   try {
@@ -333,6 +402,31 @@ app.whenReady().then(async () => {
 
     serverPort = port;
     createWindow(port);
+
+    // Auto-update (production only)
+    if (!isDev) {
+      import('electron-updater').then(({ autoUpdater }) => {
+        autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+          console.warn('Auto-update check failed:', err);
+        });
+      }).catch(() => {
+        // electron-updater not available in dev
+      });
+    }
+
+    // Parse command line args for "Open with CodePilot" integration
+    const openPath = process.argv.find(arg =>
+      !arg.startsWith('-') &&
+      arg !== process.execPath &&
+      !arg.includes('electron') &&
+      fs.existsSync(arg) &&
+      fs.statSync(arg).isDirectory()
+    );
+    if (openPath && mainWindow) {
+      mainWindow.webContents.on('did-finish-load', () => {
+        mainWindow!.webContents.send('open-folder', openPath);
+      });
+    }
   } catch (err) {
     console.error('Failed to start:', err);
     dialog.showErrorBox(

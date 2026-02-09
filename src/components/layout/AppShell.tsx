@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { NavRail } from "./NavRail";
 import { ChatListPanel } from "./ChatListPanel";
@@ -12,6 +12,7 @@ const LG_BREAKPOINT = 1024;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
 
   const [chatListOpen, setChatListOpenRaw] = useState(false);
 
@@ -41,6 +42,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setPanelOpenRaw(isChatDetailRoute);
   }, [isChatDetailRoute]);
+
+  // Listen for "Open with CodePilot" context menu / second-instance folder open
+  useEffect(() => {
+    (window as any).electronAPI?.onOpenFolder?.((folderPath: string) => {
+      setWorkingDirectory(folderPath);
+      router.push('/chat');
+    });
+  }, []);
 
   const setPanelOpen = useCallback((open: boolean) => {
     setPanelOpenRaw(open);

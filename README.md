@@ -25,7 +25,9 @@
 - **📊 Token usage tracking** -- See input/output token counts and estimated cost after every assistant response.
 - **🌗 Dark / Light theme** -- One-click theme toggle in the navigation rail.
 - **⌨️ Slash commands** -- Built-in commands like `/help`, `/clear`, `/cost`, `/compact`, `/doctor`, `/review`, and more.
+- **🔑 Multiple auth methods** -- Anthropic API key, Claude subscription (OAuth), Google Antigravity (Vertex AI), AWS Bedrock, OpenRouter, and custom providers.
 - **🖥️ Electron packaging** -- Ships as a native desktop app with a hidden title bar, bundled Next.js server, and automatic port allocation.
+- **🪟 Windows native support** -- NSIS installer for x64 and arm64, Windows titlebar overlay, path-with-spaces handling, Git Bash auto-detection.
 
 ---
 
@@ -54,7 +56,7 @@ Pre-built releases are available on the [**Releases**](https://github.com/op7418
 ### Supported Platforms
 
 - **macOS**: Universal binary (arm64 + x64) distributed as `.dmg`
-- **Windows**: x64 distributed as `.zip`
+- **Windows**: x64 and arm64 NSIS installers (`.exe`), plus a universal installer
 - **Linux**: x64 and arm64 distributed as `.AppImage`, `.deb`, and `.rpm`
 
 ---
@@ -125,6 +127,40 @@ Windows SmartScreen will block the installer or executable.
 
 ---
 
+## Authentication
+
+CodePilot supports multiple authentication methods. Configure them in **Settings > API Providers**.
+
+### Option 1: Claude Subscription (Recommended)
+
+If you have a Claude Pro, Max, or Team subscription:
+
+1. Make sure `claude` CLI is installed and run `claude login` in your terminal.
+2. No provider configuration is needed -- CodePilot will use your subscription automatically.
+
+### Option 2: Anthropic API Key
+
+1. Go to **Settings > API Providers** and click the **Anthropic** quick-add button.
+2. Enter your API key (starts with `sk-ant-...`).
+3. Click **Add Provider**, then **Apply**.
+
+### Option 3: Google Antigravity (Vertex AI)
+
+Use Google OAuth to access Claude models (including Opus 4.6) via Google Vertex AI:
+
+1. Go to **Settings > API Providers** and click the **Google Antigravity** quick-add button.
+2. Click **Login with Google** -- your browser will open to Google's sign-in page.
+3. Authorize access. The app will automatically receive the OAuth tokens.
+4. Click **Add Provider**, then **Apply**.
+
+> The Antigravity provider writes a Google Application Default Credentials (ADC) file to `~/.codepilot/google-adc.json` and uses Vertex AI mode to communicate with Claude.
+
+### Option 4: Other Providers
+
+AWS Bedrock, OpenRouter, Google Vertex (manual), and custom API endpoints are also supported via the provider manager.
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -176,6 +212,8 @@ codepilot/
 │   │   ├── claude-client.ts # Agent SDK streaming wrapper
 │   │   ├── db.ts            # SQLite schema, migrations, CRUD
 │   │   ├── files.ts         # File system helpers
+│   │   ├── antigravity.ts   # Google Antigravity OAuth + ADC
+│   │   ├── platform.ts      # Cross-platform helpers (paths, shell, binary detection)
 │   │   ├── permission-registry.ts  # Permission request/response bridge
 │   │   └── utils.ts         # Shared utilities
 │   └── types/               # TypeScript interfaces & API contracts
@@ -204,6 +242,9 @@ npm run electron:build
 
 # Package macOS DMG (universal binary)
 npm run electron:pack
+
+# Package Windows NSIS installers (x64 + arm64)
+npm run electron:pack:win
 ```
 
 ### Notes

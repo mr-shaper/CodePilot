@@ -12,7 +12,21 @@ function resolveStandaloneSymlinks() {
     const fullPath = path.join(standaloneModules, entry);
     const stat = fs.lstatSync(fullPath);
     if (stat.isSymbolicLink()) {
-      const target = fs.readlinkSync(fullPath);
+      let target;
+      try {
+        target = fs.readlinkSync(fullPath);
+      } catch {
+        // Windows may deny readlink on junctions; try realpath instead
+        try {
+          const realPath = fs.realpathSync(fullPath);
+          if (realPath !== fullPath) {
+            target = realPath;
+          }
+        } catch {
+          continue; // Skip if we can't resolve at all
+        }
+      }
+      if (!target) continue;
       const resolved = path.resolve(standaloneModules, target);
       if (fs.existsSync(resolved)) {
         fs.rmSync(fullPath, { recursive: true, force: true });

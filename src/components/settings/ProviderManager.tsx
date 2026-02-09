@@ -38,6 +38,7 @@ const QUICK_PRESETS = [
   { name: "MiniMax (Global)", provider_type: "custom", base_url: "https://api.minimax.io/anthropic", extra_env: '{"API_TIMEOUT_MS":"3000000","CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1","ANTHROPIC_API_KEY":""}' },
   { name: "AWS Bedrock", provider_type: "bedrock", base_url: "" },
   { name: "Google Vertex", provider_type: "vertex", base_url: "" },
+  { name: "Google Antigravity", provider_type: "antigravity", base_url: "", extra_env: '{"CLAUDE_CODE_USE_VERTEX":"1","CLOUD_ML_REGION":"us-east5"}' },
   { name: "LiteLLM", provider_type: "custom", base_url: "http://localhost:4000" },
 ];
 
@@ -208,7 +209,7 @@ export function ProviderManager() {
             )}
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Manage API providers for Claude Code. The active provider will be used for all sessions.
+            Manage API providers for Claude Code. Subscription users can use Claude without adding a provider.
           </p>
         </div>
         <Button size="sm" className="gap-1" onClick={handleAdd}>
@@ -262,7 +263,7 @@ export function ProviderManager() {
             <p className="text-xs mt-0.5">
               {Object.keys(envDetected).length > 0
                 ? "Using environment variables. Add a provider below to override."
-                : "Add a provider to use a custom API endpoint with Claude Code."}
+                : "Subscription (Pro/Max/Team) users: no provider needed — just run 'claude login'. Add a provider below for custom API endpoints or API key auth."}
             </p>
           </div>
           {/* Quick preset buttons */}

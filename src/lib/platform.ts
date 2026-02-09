@@ -1,4 +1,4 @@
-import { execFileSync, execFile } from 'child_process';
+import { execFileSync, execFile, execSync } from 'child_process';
 import fs from 'fs';
 import { promisify } from 'util';
 import os from 'os';
@@ -15,6 +15,36 @@ export const isMac = process.platform === 'darwin';
  */
 function needsShell(binPath: string): boolean {
   return isWindows && /\.(cmd|bat)$/i.test(binPath);
+}
+
+/**
+ * Execute a binary and return stdout. Handles Windows .cmd files with spaces in paths.
+ * execFileSync with shell:true doesn't quote paths, so .cmd files in paths with spaces fail.
+ * We use execSync with explicit quoting for .cmd/.bat on Windows.
+ */
+function execBinary(binPath: string, args: string[], options: { timeout: number; env?: NodeJS.ProcessEnv }): string {
+  if (needsShell(binPath)) {
+    // Use execSync with quoted path to handle spaces in Windows paths
+    const quotedCmd = `"${binPath}" ${args.join(' ')}`;
+    return execSync(quotedCmd, { timeout: options.timeout, stdio: 'pipe', ...(options.env ? { env: options.env } : {}) }).toString();
+  }
+  return execFileSync(binPath, args, { timeout: options.timeout, stdio: 'pipe', shell: false, ...(options.env ? { env: options.env } : {}) }).toString();
+}
+
+/**
+ * Normalize a stdio MCP server command for cross-platform compatibility.
+ * On Windows, certain commands (npx, npm, etc.) are actually .cmd wrappers
+ * and require shell execution to resolve correctly.
+ */
+export function normalizeStdioCommand(command: string): { command: string; shell: boolean } {
+  if (process.platform !== 'win32') return { command, shell: false };
+  // .cmd/.bat files need shell execution
+  if (/\.(cmd|bat)$/i.test(command)) return { command, shell: true };
+  // Common Node.js tools need shell on Windows to resolve .cmd wrappers
+  if (['npx', 'npm', 'node', 'pnpm', 'yarn', 'bunx'].includes(command)) {
+    return { command, shell: true };
+  }
+  return { command, shell: false };
 }
 
 /**
@@ -81,18 +111,33 @@ export function getClaudeCandidatePaths(): string[] {
 
 /**
  * Build an expanded PATH string with extra directories, deduped and filtered.
+ * - Filters out non-existent directories
+ * - Case-insensitive dedup on Windows (paths are case-insensitive there)
+ * - Handles paths with spaces correctly
  */
 export function getExpandedPath(): string {
   const current = process.env.PATH || '';
-  const parts = current.split(path.delimiter).filter(Boolean);
-  const seen = new Set(parts);
+  const currentParts = current.split(path.delimiter).filter(Boolean);
+
+  // On Windows, paths are case-insensitive so normalise the dedup key
+  const normalizeKey = isWindows ? (p: string) => p.toLowerCase() : (p: string) => p;
+  const seen = new Set(currentParts.map(normalizeKey));
+  const parts = [...currentParts];
+
   for (const p of getExtraPathDirs()) {
-    if (p && !seen.has(p)) {
+    const key = normalizeKey(p);
+    if (p && !seen.has(key)) {
       parts.push(p);
-      seen.add(p);
+      seen.add(key);
     }
   }
-  return parts.join(path.delimiter);
+
+  // Filter to only existing directories
+  const validParts = parts.filter(p => {
+    try { return p && fs.existsSync(p); } catch { return false; }
+  });
+
+  return validParts.join(path.delimiter);
 }
 
 /**
@@ -103,11 +148,7 @@ export function findClaudeBinary(): string | undefined {
   // Try known candidate paths first
   for (const p of getClaudeCandidatePaths()) {
     try {
-      execFileSync(p, ['--version'], {
-        timeout: 3000,
-        stdio: 'pipe',
-        shell: needsShell(p),
-      });
+      execBinary(p, ['--version'], { timeout: 3000 });
       return p;
     } catch {
       // not found, try next
@@ -130,11 +171,7 @@ export function findClaudeBinary(): string | undefined {
       const candidate = line.trim();
       if (!candidate) continue;
       try {
-        execFileSync(candidate, ['--version'], {
-          timeout: 3000,
-          stdio: 'pipe',
-          shell: needsShell(candidate),
-        });
+        execBinary(candidate, ['--version'], { timeout: 3000 });
         return candidate;
       } catch {
         continue;
@@ -153,10 +190,19 @@ export function findClaudeBinary(): string | undefined {
  */
 export async function getClaudeVersion(claudePath: string): Promise<string | null> {
   try {
+    if (needsShell(claudePath)) {
+      // Use execSync with quoted path to handle spaces in Windows paths
+      const quotedCmd = `"${claudePath}" --version`;
+      const result = execSync(quotedCmd, {
+        timeout: 5000,
+        stdio: 'pipe',
+        env: { ...process.env, PATH: getExpandedPath() } as NodeJS.ProcessEnv,
+      });
+      return result.toString().trim() || null;
+    }
     const { stdout } = await execFileAsync(claudePath, ['--version'], {
       timeout: 5000,
       env: { ...process.env, PATH: getExpandedPath() },
-      shell: needsShell(claudePath),
     });
     return stdout.trim() || null;
   } catch {
@@ -176,9 +222,16 @@ export function findGitBash(): string | null {
   }
 
   // 2. Check common installation paths
+  const home = os.homedir();
   const commonPaths = [
     'C:\\Program Files\\Git\\bin\\bash.exe',
     'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+    // Scoop installation
+    path.join(home, 'scoop', 'apps', 'git', 'current', 'bin', 'bash.exe'),
+    // Chocolatey installation
+    'C:\\ProgramData\\chocolatey\\lib\\git\\tools\\bin\\bash.exe',
+    // MSYS2
+    'C:\\msys64\\usr\\bin\\bash.exe',
   ];
   for (const p of commonPaths) {
     if (fs.existsSync(p)) {
@@ -206,6 +259,20 @@ export function findGitBash(): string | null {
     }
   } catch {
     // where git failed or timed out
+  }
+
+  // 4. Try registry as last resort
+  try {
+    const regResult = execFileSync('reg', [
+      'query', 'HKLM\\SOFTWARE\\GitForWindows', '/v', 'InstallPath'
+    ], { timeout: 3000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const match = regResult.match(/InstallPath\s+REG_SZ\s+(.+)/);
+    if (match) {
+      const bashPath = path.join(match[1].trim(), 'bin', 'bash.exe');
+      if (fs.existsSync(bashPath)) return bashPath;
+    }
+  } catch {
+    // registry query failed
   }
 
   return null;
