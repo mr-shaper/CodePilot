@@ -203,7 +203,15 @@ function convertContentToParts(
         if (isClaudeModel && block.id) {
           functionCall.id = block.id;
         }
-        parts.push({ functionCall });
+        const toolUsePart: Record<string, unknown> = { functionCall };
+        // Restore cached signature if Claude Code stripped it
+        if (block.id) {
+          const cachedSig = getCachedSignature(block.id);
+          if (cachedSig) {
+            toolUsePart.thoughtSignature = cachedSig;
+          }
+        }
+        parts.push(toolUsePart);
         break;
       }
 
@@ -407,6 +415,25 @@ function buildAntigravityRequest(
   return { url, body, headers };
 }
 
+// ── Signature cache (for thinking models) ──
+// Claude Code may strip thoughtSignature from tool_use blocks.
+// We cache them here so we can restore them on subsequent turns.
+
+const signatureCache = new Map<string, string>();        // toolId → thoughtSignature
+const thinkingSignatureCache = new Map<string, string>(); // modelFamily → last thinking signature
+
+function cacheSignature(toolId: string, signature: string): void {
+  signatureCache.set(toolId, signature);
+}
+
+function getCachedSignature(toolId: string): string | undefined {
+  return signatureCache.get(toolId);
+}
+
+function cacheThinkingSignature(signature: string, modelFamily: string): void {
+  thinkingSignatureCache.set(modelFamily, signature);
+}
+
 // ── Gemini → Anthropic SSE conversion ──
 
 interface GeminiPart {
@@ -492,6 +519,14 @@ class AnthropicSSEWriter {
     });
   }
 
+  signatureDelta(signature: string): string {
+    return formatAnthropicSSE('content_block_delta', {
+      type: 'content_block_delta',
+      index: this.blockIndex - 1,
+      delta: { type: 'signature_delta', signature },
+    });
+  }
+
   toolUseStart(name: string, id: string): string {
     const idx = this.blockIndex++;
     return formatAnthropicSSE('content_block_start', {
@@ -536,9 +571,25 @@ class AnthropicSSEWriter {
 interface StreamState {
   inTextBlock: boolean;
   inThinkingBlock: boolean;
+  currentThinkingSignature: string;
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
   hasToolCalls: boolean;
   finished: boolean;
+  model: string;
+}
+
+function closeThinkingBlock(writer: AnthropicSSEWriter, state: StreamState): string {
+  let output = '';
+  if (state.inThinkingBlock) {
+    // Emit signature_delta before closing the thinking block
+    if (state.currentThinkingSignature) {
+      output += writer.signatureDelta(state.currentThinkingSignature);
+    }
+    output += writer.blockStop();
+    state.inThinkingBlock = false;
+    state.currentThinkingSignature = '';
+  }
+  return output;
 }
 
 function processGeminiChunk(
@@ -552,6 +603,7 @@ function processGeminiChunk(
   try {
     data = JSON.parse(raw);
   } catch {
+    console.warn('[antigravity-proxy] Failed to parse SSE chunk:', raw.slice(0, 200));
     return '';
   }
 
@@ -576,16 +628,20 @@ function processGeminiChunk(
           state.inThinkingBlock = true;
         }
         output += writer.thinkingDelta(part.text);
+
+        // Cache thinking signature if present
+        if (part.thoughtSignature && part.thoughtSignature.length >= MIN_SIGNATURE_LENGTH) {
+          state.currentThinkingSignature = part.thoughtSignature;
+          const modelFamily = getModelFamily(state.model);
+          cacheThinkingSignature(part.thoughtSignature, modelFamily);
+        }
         continue;
       }
 
       // Regular text
       if (part.text !== undefined && !part.thought) {
-        // Close thinking block if open
-        if (state.inThinkingBlock) {
-          output += writer.blockStop();
-          state.inThinkingBlock = false;
-        }
+        // Close thinking block if open (with signature)
+        output += closeThinkingBlock(writer, state);
         if (!state.inTextBlock) {
           output += writer.textBlockStart();
           state.inTextBlock = true;
@@ -600,25 +656,29 @@ function processGeminiChunk(
           output += writer.blockStop();
           state.inTextBlock = false;
         }
-        if (state.inThinkingBlock) {
-          output += writer.blockStop();
-          state.inThinkingBlock = false;
-        }
+        output += closeThinkingBlock(writer, state);
 
         const toolId = part.functionCall.id || `toolu_${crypto.randomBytes(12).toString('hex')}`;
         output += writer.toolUseStart(part.functionCall.name, toolId);
         output += writer.toolUseInput(JSON.stringify(part.functionCall.args || {}));
         output += writer.blockStop();
         state.hasToolCalls = true;
+
+        // Cache tool signature for future turns (Claude Code may strip it)
+        const functionCallSignature = part.thoughtSignature;
+        if (functionCallSignature && functionCallSignature.length >= MIN_SIGNATURE_LENGTH) {
+          cacheSignature(toolId, functionCallSignature);
+        }
       }
     }
   }
 
-  // Track usage
+  // Track usage (Antigravity's promptTokenCount is TOTAL including cached)
   const usage = inner.usageMetadata;
   if (usage) {
     const promptTokens = usage.promptTokenCount || 0;
     const cachedTokens = usage.cachedContentTokenCount || 0;
+    // Anthropic format: input_tokens excludes cached
     state.usage.inputTokens = promptTokens - cachedTokens;
     state.usage.cacheReadTokens = cachedTokens;
     if (usage.candidatesTokenCount) {
@@ -632,14 +692,12 @@ function processGeminiChunk(
       output += writer.blockStop();
       state.inTextBlock = false;
     }
-    if (state.inThinkingBlock) {
-      output += writer.blockStop();
-      state.inThinkingBlock = false;
-    }
+    output += closeThinkingBlock(writer, state);
 
     let stopReason: string;
     if (candidate.finishReason === 'STOP') {
-      stopReason = 'end_turn';
+      // If there were tool calls, finishReason might still be STOP
+      stopReason = state.hasToolCalls ? 'tool_use' : 'end_turn';
     } else if (candidate.finishReason === 'MAX_TOKENS') {
       stopReason = 'max_tokens';
     } else if (candidate.finishReason === 'TOOL_USE' || state.hasToolCalls) {
@@ -806,15 +864,23 @@ export async function startAntigravityProxy(
         return;
       }
 
-      // Health check / heartbeat
-      if (req.method === 'POST' && req.url === '/') {
+      // Health check / heartbeat (GET or POST to root)
+      if (req.url === '/' || req.url === '') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end('{}');
         return;
       }
 
+      // Model listing endpoint (Claude Code may call this)
+      if (req.url?.startsWith('/v1/models')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ object: 'list', data: [] }));
+        return;
+      }
+
       // Only handle POST /v1/messages
       if (req.method !== 'POST' || !req.url?.startsWith('/v1/messages')) {
+        console.warn(`[antigravity-proxy] Unhandled ${req.method} ${req.url}`);
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
         return;
@@ -867,9 +933,11 @@ export async function startAntigravityProxy(
         const state: StreamState = {
           inTextBlock: false,
           inThinkingBlock: false,
+          currentThinkingSignature: '',
           usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
           hasToolCalls: false,
           finished: false,
+          model: anthropicReq.model,
         };
 
         // Emit message_start
@@ -896,10 +964,10 @@ export async function startAntigravityProxy(
             buffer = lines.pop() || '';
 
             for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed || !trimmed.startsWith('data: ')) continue;
-              const jsonStr = trimmed.slice(6);
-              if (jsonStr === '[DONE]') continue;
+              // SSE spec: handle both "data:payload" and "data: payload"
+              if (!line.startsWith('data:')) continue;
+              const jsonStr = line.slice(5).trim();
+              if (!jsonStr || jsonStr === '[DONE]') continue;
 
               const sseOutput = processGeminiChunk(jsonStr, writer, state);
               if (sseOutput) {
@@ -909,9 +977,9 @@ export async function startAntigravityProxy(
           }
 
           // Process remaining buffer
-          if (buffer.trim().startsWith('data: ')) {
-            const jsonStr = buffer.trim().slice(6);
-            if (jsonStr !== '[DONE]') {
+          if (buffer.startsWith('data:')) {
+            const jsonStr = buffer.slice(5).trim();
+            if (jsonStr && jsonStr !== '[DONE]') {
               const sseOutput = processGeminiChunk(jsonStr, writer, state);
               if (sseOutput) res.write(sseOutput);
             }
@@ -922,13 +990,14 @@ export async function startAntigravityProxy(
             res.write(writer.blockStop());
           }
           if (state.inThinkingBlock) {
-            res.write(writer.blockStop());
+            res.write(closeThinkingBlock(writer, state));
           }
           if (!state.finished) {
             const stopReason = state.hasToolCalls ? 'tool_use' : 'end_turn';
             res.write(writer.end(stopReason, state.usage));
           }
 
+          console.log(`[antigravity-proxy] ← done, tokens: in=${state.usage.inputTokens} out=${state.usage.outputTokens} cached=${state.usage.cacheReadTokens}`);
           res.end();
         } catch (streamErr) {
           console.error('[antigravity-proxy] Stream error:', streamErr);

@@ -264,7 +264,7 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
               // Refresh the access token first
               const tokenResult = await refreshAccessToken(activeProvider.api_key);
               if (!tokenResult) {
-                throw new Error('Failed to refresh Antigravity access token. Please re-authenticate.');
+                throw new Error('Failed to refresh Antigravity access token. Please re-authenticate in Settings > API Providers.');
               }
 
               // Fetch the GCP project ID from Antigravity backend
@@ -282,17 +282,28 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
                 tokenResult.expiresIn,
               );
 
+              // CRITICAL: Clear AUTH_TOKEN — it contains the Google refresh token,
+              // and Claude Code will crash (exit code 1) if it tries to validate
+              // a non-Anthropic token format.
+              delete sdkEnv.ANTHROPIC_AUTH_TOKEN;
               // Point Claude Code at our proxy (standard Anthropic API format)
               sdkEnv.ANTHROPIC_BASE_URL = proxyBaseUrl;
               // Set a dummy API key (proxy handles auth, but Claude Code requires one)
-              sdkEnv.ANTHROPIC_API_KEY = 'antigravity-proxy';
-              // Remove Vertex AI flags
+              sdkEnv.ANTHROPIC_API_KEY = 'sk-ant-antigravity-proxy-local';
+              // Remove Vertex AI flags that would confuse Claude Code
               delete sdkEnv.CLAUDE_CODE_USE_VERTEX;
               delete sdkEnv.CLOUD_ML_REGION;
               delete sdkEnv.GOOGLE_APPLICATION_CREDENTIALS;
               console.log(`[claude-client] Antigravity proxy running at ${proxyBaseUrl}`);
             } catch (err) {
-              console.error('[claude-client] Antigravity proxy setup failed:', err);
+              const errMsg = err instanceof Error ? err.message : String(err);
+              console.error('[claude-client] Antigravity proxy setup failed:', errMsg);
+              // Surface the error to the user instead of silently falling through
+              // with invalid env vars (which causes "exited with code 1")
+              controller.enqueue(formatSSE({ type: 'error', data: `Antigravity setup failed: ${errMsg}` }));
+              controller.enqueue(formatSSE({ type: 'done', data: '' }));
+              controller.close();
+              return;
             }
           }
         } else {
