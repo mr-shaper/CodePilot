@@ -197,10 +197,10 @@ export function ProviderForm({
         window.open(authUrl, "_blank");
       }
 
-      // Poll for completion
-      const maxAttempts = 60; // 5 minutes / 5 seconds
+      // Poll for completion (every 2s, up to 5 minutes)
+      const maxAttempts = 150;
       for (let i = 0; i < maxAttempts; i++) {
-        await new Promise((r) => setTimeout(r, 5000));
+        await new Promise((r) => setTimeout(r, 2000));
         const pollRes = await fetch("/api/providers/antigravity-auth");
         const pollData = await pollRes.json();
         if (pollData.status === "complete") {

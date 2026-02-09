@@ -5,11 +5,13 @@
  * then generates Application Default Credentials (ADC) for Claude Code's Vertex AI mode.
  *
  * Flow:
- * 1. User clicks "Login with Google" → opens browser to Google OAuth
+ * 1. User clicks "Login with Google" → opens system browser to Google OAuth
  * 2. OAuth callback on localhost:51121 → receives auth code
  * 3. Exchange auth code for refresh_token + access_token
- * 4. Store refresh_token as provider's api_key
- * 5. Before chat: write ADC file with refresh_token → Claude Code uses Vertex AI mode
+ * 4. Write result to ~/.codepilot/antigravity-pending.json (file-based IPC)
+ * 5. Frontend polls API, which reads the file → gets refreshToken + email
+ * 6. Store refresh_token as provider's api_key
+ * 7. Before chat: write ADC file with refresh_token → Claude Code uses Vertex AI mode
  */
 
 import crypto from 'crypto';
@@ -30,6 +32,11 @@ const SCOPES = [
 
 const CALLBACK_PORT = 51121;
 
+/** Path to the file used to communicate OAuth results between callback server and API route */
+function getPendingFilePath(): string {
+  return path.join(os.homedir(), '.codepilot', 'antigravity-pending.json');
+}
+
 // PKCE helpers
 function base64url(buffer: Buffer): string {
   return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -41,31 +48,70 @@ function generatePKCE(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-/** Active OAuth state (in-memory, one at a time) */
-let pendingOAuth: {
-  verifier: string;
-  resolve: (result: { refreshToken: string; email: string }) => void;
-  reject: (err: Error) => void;
-  server: http.Server;
-  timeout: ReturnType<typeof setTimeout>;
-} | null = null;
+/** Track active server so we can cancel if a new OAuth starts */
+let activeServer: http.Server | null = null;
+let activeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Write OAuth result to the pending file.
+ * This is the file-based IPC mechanism between the callback HTTP server
+ * and the Next.js API route that the frontend polls.
+ */
+function writePendingResult(data: { status: 'complete'; refreshToken: string; email: string } | { status: 'error'; error: string }): void {
+  const dir = path.join(os.homedir(), '.codepilot');
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(getPendingFilePath(), JSON.stringify(data), { mode: 0o600 });
+}
+
+/**
+ * Read and consume the pending OAuth result file.
+ * Returns null if no pending result. Deletes the file after reading.
+ */
+export function readPendingResult(): { status: 'complete'; refreshToken: string; email: string } | { status: 'error'; error: string } | null {
+  const filePath = getPendingFilePath();
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    // Delete after reading (consume once)
+    fs.unlinkSync(filePath);
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clear any stale pending result file (called when starting a new OAuth flow).
+ */
+function clearPendingResult(): void {
+  try {
+    const filePath = getPendingFilePath();
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch {
+    // ignore
+  }
+}
 
 /**
  * Start the Antigravity OAuth flow.
- * Returns the authorization URL to open in the browser.
- * The returned Promise resolves when the callback is received.
+ * Returns the authorization URL to open in the system browser.
+ * The callback server writes the result to a file, which the API route polls.
  */
-export function startAntigravityOAuth(): {
-  authUrl: string;
-  promise: Promise<{ refreshToken: string; email: string }>;
-} {
+export function startAntigravityOAuth(): { authUrl: string } {
   // Cancel any pending OAuth
-  if (pendingOAuth) {
-    pendingOAuth.reject(new Error('New OAuth started'));
-    clearTimeout(pendingOAuth.timeout);
-    try { pendingOAuth.server.close(); } catch {}
-    pendingOAuth = null;
+  if (activeServer) {
+    try { activeServer.close(); } catch {}
+    activeServer = null;
   }
+  if (activeTimeout) {
+    clearTimeout(activeTimeout);
+    activeTimeout = null;
+  }
+
+  // Clear stale result file
+  clearPendingResult();
 
   const pkce = generatePKCE();
 
@@ -79,111 +125,119 @@ export function startAntigravityOAuth(): {
   url.searchParams.set('access_type', 'offline');
   url.searchParams.set('prompt', 'consent');
 
-  const promise = new Promise<{ refreshToken: string; email: string }>((resolve, reject) => {
-    const server = http.createServer(async (req, res) => {
-      if (!req.url?.startsWith('/oauth-callback')) {
-        res.writeHead(404);
-        res.end('Not found');
-        return;
+  const server = http.createServer(async (req, res) => {
+    if (!req.url?.startsWith('/oauth-callback')) {
+      res.writeHead(404);
+      res.end('Not found');
+      return;
+    }
+
+    try {
+      const callbackUrl = new URL(req.url, `http://localhost:${CALLBACK_PORT}`);
+      const code = callbackUrl.searchParams.get('code');
+      if (!code) {
+        throw new Error('No authorization code received');
       }
 
+      // Exchange code for tokens
+      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: CLIENT_ID,
+          client_secret: CLIENT_SECRET,
+          code,
+          grant_type: 'authorization_code',
+          redirect_uri: REDIRECT_URI,
+          code_verifier: pkce.verifier,
+        }),
+      });
+
+      if (!tokenResponse.ok) {
+        const errText = await tokenResponse.text();
+        throw new Error(`Token exchange failed: ${errText}`);
+      }
+
+      const tokens = await tokenResponse.json() as {
+        access_token: string;
+        refresh_token?: string;
+        expires_in: number;
+      };
+
+      if (!tokens.refresh_token) {
+        throw new Error('No refresh token received. Please revoke app access and try again.');
+      }
+
+      // Fetch user email
+      let email = '';
       try {
-        const callbackUrl = new URL(req.url, `http://localhost:${CALLBACK_PORT}`);
-        const code = callbackUrl.searchParams.get('code');
-        if (!code) {
-          throw new Error('No authorization code received');
-        }
-
-        // Exchange code for tokens
-        const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: CLIENT_ID,
-            client_secret: CLIENT_SECRET,
-            code,
-            grant_type: 'authorization_code',
-            redirect_uri: REDIRECT_URI,
-            code_verifier: pkce.verifier,
-          }),
+        const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+          headers: { Authorization: `Bearer ${tokens.access_token}` },
         });
-
-        if (!tokenResponse.ok) {
-          const errText = await tokenResponse.text();
-          throw new Error(`Token exchange failed: ${errText}`);
+        if (userInfoRes.ok) {
+          const userInfo = await userInfoRes.json() as { email?: string };
+          email = userInfo.email || '';
         }
-
-        const tokens = await tokenResponse.json() as {
-          access_token: string;
-          refresh_token?: string;
-          expires_in: number;
-        };
-
-        if (!tokens.refresh_token) {
-          throw new Error('No refresh token received. Please revoke app access and try again.');
-        }
-
-        // Fetch user email
-        let email = '';
-        try {
-          const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
-            headers: { Authorization: `Bearer ${tokens.access_token}` },
-          });
-          if (userInfoRes.ok) {
-            const userInfo = await userInfoRes.json() as { email?: string };
-            email = userInfo.email || '';
-          }
-        } catch {
-          // email is optional
-        }
-
-        // Success page
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`<!DOCTYPE html><html><head><title>CodePilot - Auth Success</title>
-          <style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#fff}
-          .card{text-align:center;padding:3rem;border-radius:1rem;background:#1a1a1a;border:1px solid #333}
-          h1{color:#4ade80;margin-bottom:0.5rem}p{color:#999;margin-top:0.5rem}</style></head>
-          <body><div class="card"><h1>Authentication Successful</h1>
-          <p>${email ? `Signed in as ${email}` : 'You can close this window and return to CodePilot.'}</p></div></body></html>`);
-
-        resolve({ refreshToken: tokens.refresh_token, email });
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'text/html' });
-        res.end(`<!DOCTYPE html><html><head><title>CodePilot - Auth Failed</title>
-          <style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#fff}
-          .card{text-align:center;padding:3rem;border-radius:1rem;background:#1a1a1a;border:1px solid #333}
-          h1{color:#ef4444;margin-bottom:0.5rem}p{color:#999}</style></head>
-          <body><div class="card"><h1>Authentication Failed</h1>
-          <p>${err instanceof Error ? err.message : 'Unknown error'}</p></div></body></html>`);
-        reject(err instanceof Error ? err : new Error(String(err)));
-      } finally {
-        // Clean up
-        clearTimeout(pendingOAuth?.timeout as ReturnType<typeof setTimeout>);
-        try { server.close(); } catch {}
-        pendingOAuth = null;
+      } catch {
+        // email is optional
       }
-    });
 
-    server.listen(CALLBACK_PORT, '127.0.0.1', () => {
-      console.log(`[antigravity] OAuth callback server listening on port ${CALLBACK_PORT}`);
-    });
+      // Write result to file for the API route to pick up
+      writePendingResult({ status: 'complete', refreshToken: tokens.refresh_token, email });
+      console.log(`[antigravity] OAuth success, email=${email}, result written to file`);
 
-    server.on('error', (err) => {
-      reject(new Error(`Failed to start OAuth callback server: ${err.message}`));
-      pendingOAuth = null;
-    });
+      // Success page — tells user to go back to CodePilot
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<!DOCTYPE html><html><head><title>CodePilot - Auth Success</title>
+        <style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#fff}
+        .card{text-align:center;padding:3rem;border-radius:1rem;background:#1a1a1a;border:1px solid #333}
+        h1{color:#4ade80;margin-bottom:0.5rem}p{color:#999;margin-top:0.5rem}.hint{font-size:0.85rem;margin-top:1rem;color:#666}</style></head>
+        <body><div class="card"><h1>Authentication Successful</h1>
+        <p>${email ? `Signed in as ${email}` : 'Google account connected.'}</p>
+        <p class="hint">You can close this tab and return to CodePilot.</p></div></body></html>`);
+    } catch (err) {
+      // Write error to file
+      writePendingResult({ status: 'error', error: err instanceof Error ? err.message : String(err) });
+      console.error(`[antigravity] OAuth failed:`, err);
 
-    // 5 minute timeout
-    const timeout = setTimeout(() => {
-      reject(new Error('OAuth login timed out (5 minutes)'));
-      try { server.close(); } catch {}
-      pendingOAuth = null;
-    }, 5 * 60 * 1000);
-
-    pendingOAuth = { verifier: pkce.verifier, resolve, reject, server, timeout };
+      res.writeHead(500, { 'Content-Type': 'text/html' });
+      res.end(`<!DOCTYPE html><html><head><title>CodePilot - Auth Failed</title>
+        <style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#fff}
+        .card{text-align:center;padding:3rem;border-radius:1rem;background:#1a1a1a;border:1px solid #333}
+        h1{color:#ef4444;margin-bottom:0.5rem}p{color:#999}</style></head>
+        <body><div class="card"><h1>Authentication Failed</h1>
+        <p>${err instanceof Error ? err.message : 'Unknown error'}</p></div></body></html>`);
+    } finally {
+      // Clean up server after handling callback
+      if (activeTimeout) { clearTimeout(activeTimeout); activeTimeout = null; }
+      setTimeout(() => {
+        try { server.close(); } catch {}
+        if (activeServer === server) activeServer = null;
+      }, 1000); // delay 1s to let response flush
+    }
   });
 
-  return { authUrl: url.toString(), promise };
+  server.listen(CALLBACK_PORT, '0.0.0.0', () => {
+    console.log(`[antigravity] OAuth callback server listening on port ${CALLBACK_PORT}`);
+  });
+
+  server.on('error', (err) => {
+    console.error(`[antigravity] Callback server error:`, err);
+    writePendingResult({ status: 'error', error: `Failed to start callback server: ${err.message}` });
+    activeServer = null;
+  });
+
+  activeServer = server;
+
+  // 5 minute timeout
+  activeTimeout = setTimeout(() => {
+    writePendingResult({ status: 'error', error: 'OAuth login timed out (5 minutes)' });
+    try { server.close(); } catch {}
+    activeServer = null;
+    activeTimeout = null;
+  }, 5 * 60 * 1000);
+
+  return { authUrl: url.toString() };
 }
 
 /**

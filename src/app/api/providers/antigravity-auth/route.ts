@@ -1,40 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { startAntigravityOAuth, refreshAccessToken } from '@/lib/antigravity';
-
-/**
- * In-memory storage for the pending OAuth promise.
- * Only one OAuth flow at a time is supported.
- */
-let pendingResult: Promise<{ refreshToken: string; email: string }> | null = null;
-let lastResult: { refreshToken: string; email: string } | null = null;
-let lastError: string | null = null;
+import { startAntigravityOAuth, readPendingResult, refreshAccessToken } from '@/lib/antigravity';
 
 /**
  * POST /api/providers/antigravity-auth
- * Start the Antigravity OAuth flow. Returns the auth URL to open in the browser.
+ * Start the Antigravity OAuth flow. Returns the auth URL to open in the system browser.
  */
 export async function POST() {
   try {
-    // Reset state
-    lastResult = null;
-    lastError = null;
-
-    const { authUrl, promise } = startAntigravityOAuth();
-    pendingResult = promise;
-
-    // Listen for result in background
-    promise
-      .then((result) => {
-        lastResult = result;
-        lastError = null;
-        pendingResult = null;
-      })
-      .catch((err) => {
-        lastError = err instanceof Error ? err.message : String(err);
-        lastResult = null;
-        pendingResult = null;
-      });
-
+    const { authUrl } = startAntigravityOAuth();
     return NextResponse.json({ authUrl });
   } catch (error) {
     return NextResponse.json(
@@ -46,7 +19,7 @@ export async function POST() {
 
 /**
  * GET /api/providers/antigravity-auth
- * Poll for OAuth completion status.
+ * Poll for OAuth completion by reading the result file written by the callback server.
  */
 export async function GET(request: NextRequest) {
   const action = request.nextUrl.searchParams.get('action');
@@ -61,26 +34,21 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ valid: !!result });
   }
 
-  // Poll for OAuth result
-  if (lastResult) {
-    const result = lastResult;
-    lastResult = null; // consume once
-    return NextResponse.json({
-      status: 'complete',
-      refreshToken: result.refreshToken,
-      email: result.email,
-    });
+  // Poll for OAuth result from file
+  const pending = readPendingResult();
+  if (pending) {
+    if (pending.status === 'complete') {
+      return NextResponse.json({
+        status: 'complete',
+        refreshToken: pending.refreshToken,
+        email: pending.email,
+      });
+    }
+    if (pending.status === 'error') {
+      return NextResponse.json({ status: 'error', error: pending.error });
+    }
   }
 
-  if (lastError) {
-    const error = lastError;
-    lastError = null;
-    return NextResponse.json({ status: 'error', error });
-  }
-
-  if (pendingResult) {
-    return NextResponse.json({ status: 'pending' });
-  }
-
-  return NextResponse.json({ status: 'idle' });
+  // No result yet
+  return NextResponse.json({ status: 'pending' });
 }
