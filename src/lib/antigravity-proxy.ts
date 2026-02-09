@@ -18,7 +18,23 @@
 import http from 'http';
 import crypto from 'crypto';
 import os from 'os';
+import fs from 'fs';
+import path from 'path';
 import { refreshAccessToken } from './antigravity';
+
+// ── Debug file logger ──
+const LOG_FILE = path.join(os.homedir(), '.codepilot', 'antigravity-debug.log');
+
+function debugLog(tag: string, ...args: unknown[]): void {
+  const ts = new Date().toISOString();
+  const msg = `[${ts}] [${tag}] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}`;
+  console.log(msg);
+  try {
+    const dir = path.dirname(LOG_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(LOG_FILE, msg + '\n');
+  } catch { /* ignore */ }
+}
 
 // ── Constants (aligned with antigravity-claude-proxy) ──
 
@@ -109,6 +125,51 @@ interface AnthropicRequest {
   stop_sequences?: string[];
   thinking?: { budget_tokens?: number };
   metadata?: unknown;
+}
+
+// ── Model name mapping ──
+// Antigravity gateway uses short model names, not full Anthropic IDs.
+// Claude Code sends full IDs like "claude-sonnet-4-5-20250929".
+// We need to map them to the supported Antigravity names.
+
+const ANTIGRAVITY_MODEL_MAP: Record<string, string> = {
+  // Opus variants → claude-opus-4-5-thinking
+  'claude-opus-4-6': 'claude-opus-4-5-thinking',
+  'claude-opus-4-5': 'claude-opus-4-5-thinking',
+  // Sonnet variants → claude-sonnet-4-5 or -thinking
+  'claude-sonnet-4-5': 'claude-sonnet-4-5',
+  'claude-sonnet-4-5-thinking': 'claude-sonnet-4-5-thinking',
+  // Haiku → use sonnet (no haiku on Antigravity)
+  'claude-haiku-4-5': 'claude-sonnet-4-5',
+};
+
+/**
+ * Map a Claude Code model name to an Antigravity-compatible name.
+ * Strips date suffixes (e.g. "-20250929") and maps to known short names.
+ * Gemini models pass through unchanged.
+ */
+function mapModelName(model: string): string {
+  const lower = model.toLowerCase();
+
+  // Gemini models: pass through
+  if (lower.includes('gemini')) return model;
+
+  // Try exact match first
+  if (ANTIGRAVITY_MODEL_MAP[lower]) return ANTIGRAVITY_MODEL_MAP[lower];
+
+  // Strip date suffix (e.g. "claude-sonnet-4-5-20250929" → "claude-sonnet-4-5")
+  const withoutDate = lower.replace(/-\d{8}$/, '');
+  if (ANTIGRAVITY_MODEL_MAP[withoutDate]) return ANTIGRAVITY_MODEL_MAP[withoutDate];
+
+  // Fuzzy match: find closest known model
+  if (lower.includes('opus')) return 'claude-opus-4-5-thinking';
+  if (lower.includes('haiku')) return 'claude-sonnet-4-5';
+  if (lower.includes('sonnet') && lower.includes('thinking')) return 'claude-sonnet-4-5-thinking';
+  if (lower.includes('sonnet')) return 'claude-sonnet-4-5';
+  if (lower.includes('claude')) return 'claude-sonnet-4-5';
+
+  // Unknown model — pass through and hope for the best
+  return model;
 }
 
 // ── Anthropic → Gemini conversion ──
@@ -295,11 +356,32 @@ function convertTools(tools: AnthropicTool[]): Array<{ functionDeclarations: unk
   return [{ functionDeclarations: declarations }];
 }
 
+function deriveSessionId(messages: AnthropicMessage[]): string {
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      const text = typeof msg.content === 'string'
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.filter(b => b.type === 'text').map(b => b.text || '').join('\n')
+          : '';
+      if (text) {
+        return crypto.createHash('sha256').update(text).digest('hex').substring(0, 32);
+      }
+    }
+  }
+  return crypto.randomUUID();
+}
+
 function buildAntigravityRequest(
   req: AnthropicRequest,
   projectId: string,
 ): { url: string; body: string; headers: Record<string, string> } {
-  const model = req.model;
+  // Map model name to Antigravity-compatible format
+  const mappedModel = mapModelName(req.model);
+  const model = mappedModel;
+  if (mappedModel !== req.model) {
+    debugLog('proxy',` Model mapped: ${req.model} → ${mappedModel}`);
+  }
   const modelFamily = getModelFamily(model);
   const isClaudeModel = modelFamily === 'claude';
   const isThinking = isThinkingModel(model);
@@ -379,6 +461,7 @@ function buildAntigravityRequest(
     contents,
     generationConfig,
     systemInstruction: { role: 'user', parts: systemParts },
+    sessionId: deriveSessionId(messages),
   };
 
   // Tools
@@ -779,15 +862,15 @@ export async function fetchAntigravityProjectId(accessToken: string): Promise<st
       const tierId = getDefaultTierId(data.allowedTiers) || 'FREE';
       const onboardedProject = await onboardUser(accessToken, tierId);
       if (onboardedProject) {
-        console.log(`[antigravity-proxy] Successfully onboarded, project: ${onboardedProject}`);
+        debugLog('proxy',` Successfully onboarded, project: ${onboardedProject}`);
         return onboardedProject;
       }
     } catch (err) {
-      console.warn(`[antigravity-proxy] Project discovery failed at ${base}:`, err);
+      debugLog('proxy-warn',` Project discovery failed at ${base}:`, err);
     }
   }
 
-  console.warn(`[antigravity-proxy] Using fallback project ID: ${DEFAULT_PROJECT_ID}`);
+  debugLog('proxy-warn',` Using fallback project ID: ${DEFAULT_PROJECT_ID}`);
   return DEFAULT_PROJECT_ID;
 }
 
@@ -880,7 +963,7 @@ export async function startAntigravityProxy(
 
       // Only handle POST /v1/messages
       if (req.method !== 'POST' || !req.url?.startsWith('/v1/messages')) {
-        console.warn(`[antigravity-proxy] Unhandled ${req.method} ${req.url}`);
+        debugLog('proxy-warn',` Unhandled ${req.method} ${req.url}`);
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
         return;
@@ -902,7 +985,7 @@ export async function startAntigravityProxy(
         const { url, body, headers } = buildAntigravityRequest(anthropicReq, proxyConfig!.projectId);
         headers['Authorization'] = `Bearer ${token}`;
 
-        console.log(`[antigravity-proxy] → ${anthropicReq.model}, messages=${anthropicReq.messages.length}, tools=${anthropicReq.tools?.length || 0}, stream=${anthropicReq.stream !== false}`);
+        debugLog('proxy',` → ${anthropicReq.model}, messages=${anthropicReq.messages.length}, tools=${anthropicReq.tools?.length || 0}, stream=${anthropicReq.stream !== false}`);
 
         // Send to Antigravity
         const agResponse = await fetch(url, {
@@ -997,17 +1080,17 @@ export async function startAntigravityProxy(
             res.write(writer.end(stopReason, state.usage));
           }
 
-          console.log(`[antigravity-proxy] ← done, tokens: in=${state.usage.inputTokens} out=${state.usage.outputTokens} cached=${state.usage.cacheReadTokens}`);
+          debugLog('proxy',` ← done, tokens: in=${state.usage.inputTokens} out=${state.usage.outputTokens} cached=${state.usage.cacheReadTokens}`);
           res.end();
         } catch (streamErr) {
-          console.error('[antigravity-proxy] Stream error:', streamErr);
+          debugLog('proxy-error',' Stream error:', streamErr);
           if (!state.finished) {
             res.write(writer.end('end_turn', state.usage));
           }
           res.end();
         }
       } catch (err) {
-        console.error('[antigravity-proxy] Request error:', err);
+        debugLog('proxy-error',' Request error:', err);
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
         }
@@ -1024,7 +1107,7 @@ export async function startAntigravityProxy(
         proxyPort = addr.port;
         proxyServer = server;
         const baseUrl = `http://127.0.0.1:${proxyPort}`;
-        console.log(`[antigravity-proxy] Proxy server started on ${baseUrl}`);
+        debugLog('proxy',` Proxy server started on ${baseUrl}`);
         resolve(baseUrl);
       } else {
         reject(new Error('Failed to get proxy server address'));
